@@ -11,8 +11,8 @@
 // WIFI / BACKEND
 // ============================================================
 
-const char* WIFI_SSID = "Airtel_ibra_3538";
-const char* WIFI_PASSWORD = "Zainab@66";
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 const char* BACKEND_URL =
     "http://192.168.1.10:3000/api/readings";
