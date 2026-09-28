@@ -4,16 +4,24 @@ JavaScript prototype for the SIH 2026 environmental hazard pipeline:
 
 `MQ-2 / MQ-135 / rain / soil / water -> ESP32 -> HTTP or MQTT -> Node.js hazard engine -> live map -> rerouting`
 
-## Run
+## Run the Prithvi AI dashboard and backend
 
 Install Node.js 18+ first, then:
 
 ```powershell
+cd D:\Prithvi-AI\SIH_2026
 npm install
+$token = node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+$token
+$env:DEVICE_TOKEN = $token
 npm start
 ```
 
-Open http://localhost:3000.
+Copy the generated token into `DEVICE_TOKEN` in the ESP32 sketch. Open http://localhost:3000/prithvi/ for the original Prithvi AI dashboard. The standalone gateway UI remains at http://localhost:3000.
+
+The ESP32 telemetry POST endpoint requires this shared token in the `X-Device-Token` header. The server rejects missing/incorrect tokens, bounds JSON request size and sensor ranges, rate-limits writes, and retains the latest 600 readings in memory for the monitoring graphs. Set the token again in the same terminal before each server start; do not commit the token.
+
+In `ino_sketch/PrithviAi.ino`, set the Wi-Fi SSID/password, the same `DEVICE_TOKEN`, and `BACKEND_URL` to `http://<computer-LAN-IPv4>:3000/api/readings`. Connect the HC-SR04 TRIG/ECHO to GPIO 25/26; the ECHO signal must be reduced to 3.3V with a voltage divider, and all modules need a common ground. MQ-2, MQ-135, rain, and soil analog outputs use GPIO 32, 33, 35, and 34 respectively; DHT11 data uses GPIO 14. The ESP32 and computer must be on the same trusted Wi-Fi network. Allow Node.js through Windows Firewall on Private networks only. Do not port-forward this HTTP server to the public internet: local HTTP is not encrypted, so a shared token can be observed by another device on the same network. Rotate any Wi-Fi credentials that have been pasted into chat or committed.
 
 Use **Simulate hazard** to switch between safe and threatening telemetry. The browser refreshes readings every five seconds.
 
