@@ -43,6 +43,57 @@
 
   const HAZARD_COLOR = { flood:"rgb(79,142,247)", fire:"rgb(255,122,69)", pollution:"rgb(183,140,224)" };
   const HAZARD_METRIC_KEY = { flood:"waterLevel", fire:"temperature", pollution:"aqi" };
+  let realMap = null;
+  let realRouteA = null;
+  let realRouteB = null;
+  let realBlockedMarker = null;
+  let realPollutionZones = [];
+
+  const DELHI_ROUTE_A = [[28.6442,77.2166],[28.6373,77.2182],[28.6285,77.2194],[28.6128,77.2295],[28.6418,77.2250],[28.6602,77.2050],[28.6760,77.1888]];
+  const DELHI_ROUTE_B = [[28.6442,77.2166],[28.6488,77.2045],[28.6575,77.1963],[28.6672,77.1915],[28.6760,77.1888]];
+
+  function initRealMap(){
+    const mapEl = document.getElementById("real-route-map");
+    if(!mapEl || typeof L === "undefined" || realMap) return;
+    realMap = L.map(mapEl, { zoomControl:true, scrollWheelZoom:false }).setView([28.635,77.207], 13);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom:19,
+      attribution:'&copy; OpenStreetMap contributors',
+    }).addTo(realMap);
+    realRouteA = L.polyline(DELHI_ROUTE_A, { color:"#1688e8", weight:7, opacity:0.95 }).addTo(realMap).bindTooltip("Route A - Main corridor", { permanent:true, direction:"top", className:"route-tooltip-a" });
+    realRouteB = L.polyline(DELHI_ROUTE_B, { color:"#22a66f", weight:7, opacity:0.38, dashArray:"10 8" }).addTo(realMap).bindTooltip("Route B - Ridge Road", { permanent:true, direction:"top", className:"route-tooltip-b" });
+    realBlockedMarker = L.circleMarker(DELHI_ROUTE_A[3], { radius:10, color:"#ffffff", weight:2, fillColor:"#b8444d", fillOpacity:0 }).addTo(realMap).bindTooltip("Route A blocked by floodwater", { permanent:true, direction:"top" });
+    [[28.650,77.205,900],[28.635,77.235,1050],[28.615,77.205,850]].forEach((zone, index)=>{
+      realPollutionZones.push(L.circle([zone[0],zone[1]], { radius:zone[2], color:"#e17842", weight:2, dashArray:"8 6", fillColor:"#c46a42", fillOpacity:0 }).addTo(realMap).bindTooltip("High pollution region " + (index + 1), { direction:"top" }));
+    });
+    L.circleMarker(DELHI_ROUTE_A[0], { radius:8, color:"#ffffff", weight:3, fillColor:"#172635", fillOpacity:1 }).addTo(realMap).bindTooltip("Start", { permanent:true, direction:"bottom" });
+    L.circleMarker(DELHI_ROUTE_A[DELHI_ROUTE_A.length-1], { radius:9, color:"#ffffff", weight:3, fillColor:"#22a66f", fillOpacity:1 }).addTo(realMap).bindTooltip("Community rain shelter", { permanent:true, direction:"top" });
+    updateRealRouteMap("normal");
+  }
+
+  function updateRealRouteMap(mode){
+    if(!realRouteA || !realRouteB) return;
+    const rerouting = mode === "reroute";
+    realRouteA.setStyle({ weight:rerouting ? 5 : 9, opacity:rerouting ? 0.3 : 0.95 });
+    realRouteB.setStyle({ weight:rerouting ? 10 : 7, opacity:rerouting ? 0.98 : 0.38 });
+    realBlockedMarker.setStyle({ opacity:rerouting ? 1 : 0, fillOpacity:rerouting ? 0.95 : 0 });
+    realPollutionZones.forEach(zone=>zone.setStyle({ opacity:mode === "pollution" ? 0.95 : 0, fillOpacity:mode === "pollution" ? 0.28 : 0 }));
+  }
+
+  function wireMapViewSwitch(){
+    const wrap = document.querySelector(".route-map-wrap");
+    document.querySelectorAll("[data-map-view]").forEach(button=>{
+      button.addEventListener("click", ()=>{
+        const real = button.dataset.mapView === "real";
+        document.querySelectorAll("[data-map-view]").forEach(item=>item.classList.toggle("active", item === button));
+        wrap.classList.toggle("real-active", real);
+        if(real){
+          initRealMap();
+          if(realMap) setTimeout(()=>realMap.invalidateSize(), 0);
+        }
+      });
+    });
+  }
 
   function riskAccent(level){
     return { normal:"var(--safe)", warning:"var(--warn)", high:"#ff8f4d", critical:"var(--danger)" }[level];
@@ -78,6 +129,56 @@
       const series = s.history[hazard].map(p=>p[HAZARD_METRIC_KEY[hazard]]);
       drawSpark(spark, series, HAZARD_COLOR[hazard]);
     });
+  }
+
+  function renderRouteDecision(s){
+    const panel = document.getElementById("route-panel");
+    if(!panel) return;
+    const routeInfo = s.route || { title:"Primary route active", route:"Route A — Main corridor remains open", shelter:"Rain shelter not required", note:"No flood reroute required." };
+    const pollutionActive = s.demoScenario === "pollution" && s.risk.pollution !== "normal";
+    const activeMode = pollutionActive ? "pollution" : (routeInfo.mode || "normal");
+    const pollutionZones = document.getElementById("pollution-zones");
+    const pollutionAdvisory = document.getElementById("pollution-advisory");
+    if(pollutionActive){
+      panel.innerHTML = `<div class="ab-title" style="margin-bottom:8px;">Pollution health advisory active</div><div style="margin-bottom:6px;"><b>Air quality:</b> High-risk regions marked on the map</div><div style="margin-bottom:6px;"><b>Recommended action:</b> Remain indoors and avoid strenuous outdoor activity.</div><div style="color:var(--text-dim);font-size:12.5px;">Keep windows closed and limit exposure until air quality improves.</div>`;
+    } else {
+      panel.innerHTML = `<div class="ab-title" style="margin-bottom:8px;">${routeInfo.title}</div><div style="margin-bottom:6px;"><b>Selected route:</b> ${routeInfo.route}</div><div style="margin-bottom:6px;"><b>Rain shelter:</b> ${routeInfo.shelter}</div><div style="color:var(--text-dim);font-size:12.5px;">${routeInfo.note}</div>`;
+    }
+    if(pollutionZones) pollutionZones.setAttribute("opacity", pollutionActive ? "1" : "0");
+    if(pollutionAdvisory) pollutionAdvisory.hidden = !pollutionActive;
+    panel.innerHTML = `
+      <div class="ab-title" style="margin-bottom:8px;">${routeInfo.title}</div>
+      <div style="margin-bottom:6px;"><b>Selected route:</b> ${routeInfo.route}</div>
+      <div style="margin-bottom:6px;"><b>Rain shelter:</b> ${routeInfo.shelter}</div>
+      <div style="color:var(--text-dim);font-size:12.5px;">${routeInfo.note}</div>
+    `;
+
+    const routeA = document.getElementById("routeA");
+    const routeB = document.getElementById("routeB");
+    const blockedMarker = document.getElementById("route-blocked");
+    if(blockedMarker) blockedMarker.setAttribute("opacity", activeMode === "reroute" ? "1" : "0");
+    if(routeA && routeB){
+      if(activeMode === "pollution"){
+        routeA.setAttribute("stroke-opacity", "0.12");
+        routeB.setAttribute("stroke-opacity", "0.12");
+      } else if(activeMode === "reroute"){
+        routeA.setAttribute("stroke", "#4aa3ff");
+        routeA.setAttribute("stroke-opacity", "0.28");
+        routeA.setAttribute("stroke-width", "12");
+        routeB.setAttribute("stroke", "#39d08f");
+        routeB.setAttribute("stroke-opacity", "1");
+        routeB.setAttribute("stroke-width", "16");
+      } else {
+        routeA.setAttribute("stroke", "#4aa3ff");
+        routeA.setAttribute("stroke-opacity", "1");
+        routeA.setAttribute("stroke-width", "16");
+        routeB.setAttribute("stroke", "#39d08f");
+        routeB.setAttribute("stroke-opacity", "0.35");
+        routeB.setAttribute("stroke-width", "12");
+      }
+    }
+    initRealMap();
+    updateRealRouteMap(activeMode);
   }
 
   function renderRiskStrip(s){
@@ -131,6 +232,7 @@
 
   function render(s){
     renderCards(s);
+    renderRouteDecision(s);
     renderRiskStrip(s);
     renderAlerts(s);
   }
@@ -138,6 +240,7 @@
   document.addEventListener("DOMContentLoaded", ()=>{
     PRITHVI.sensors.subscribe(render);
     render(PRITHVI.sensors.getState());
+    wireMapViewSwitch();
 
     document.getElementById("dash-refresh").addEventListener("click", ()=>{
       PRITHVI.sensors.refreshOnce();

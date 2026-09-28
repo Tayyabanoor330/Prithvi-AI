@@ -1,0 +1,1076 @@
+#include <DHT.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <math.h>
+
+#include "flood_model.h"
+#include "aqi_model.h"
+
+// ============================================================
+// WIFI / BACKEND
+// ============================================================
+
+const char* WIFI_SSID = "Airtel_ibra_3538";
+const char* WIFI_PASSWORD = "Zainab@66";
+
+const char* BACKEND_URL =
+    "http://192.168.1.10:3000/api/readings";
+
+const unsigned long SEND_INTERVAL_MS = 5000;
+unsigned long lastSendMs = 0;
+
+// ============================================================
+// SENSOR PINS
+// ============================================================
+
+#define DHT_PIN 14
+#define DHT_TYPE DHT11
+
+#define MQ2_PIN 32
+#define MQ135_PIN 33
+
+#define RAIN_PIN 35
+#define SOIL_PIN 34
+
+#define TRIG_PIN 25
+#define ECHO_PIN 26
+
+#define BUZZER_PIN 4
+#define LED_PIN 23
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// ============================================================
+// SENSOR CALIBRATION
+// ============================================================
+
+// IMPORTANT:
+// With the tank EMPTY, the HC-SR04 currently measures
+// approximately 7.72 cm.
+//
+// Therefore:
+// empty distance = 7.72 cm
+// water level = 7.72 - measured distance
+//
+// Example:
+// distance 7.72 cm -> water level 0.00 cm
+// distance 6.72 cm -> water level 1.00 cm
+// distance 5.72 cm -> water level 2.00 cm
+
+const float EMPTY_DISTANCE_CM = 7.72;
+
+// Maximum physical water level used by the prototype.
+// Since the sensor-to-bottom distance is approximately
+// 7.72 cm, the measurable water depth is approximately 7.72 cm.
+const float MAX_WATER_LEVEL_CM = 7.72;
+
+const float ADC_MAX = 4095.0;
+
+// ============================================================
+// WATER DISTANCE
+// ============================================================
+
+float getWaterDistance() {
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(5);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration =
+      pulseIn(
+          ECHO_PIN,
+          HIGH,
+          50000
+      );
+
+  Serial.print("Echo duration: ");
+  Serial.println(duration);
+
+  if (duration == 0) {
+    return -1.0;
+  }
+
+  float distance =
+      duration * 0.0343 / 2.0;
+
+  return distance;
+}
+
+// ============================================================
+// WATER LEVEL CALCULATION
+// ============================================================
+
+float calculateWaterLevel(float waterDistance) {
+
+  // No valid ultrasonic reading
+  if (waterDistance < 0.0) {
+    return 0.0;
+  }
+
+  // Empty tank reference minus current distance
+  float waterLevel =
+      EMPTY_DISTANCE_CM - waterDistance;
+
+  // Prevent negative values caused by sensor noise
+  if (waterLevel < 0.0) {
+    waterLevel = 0.0;
+  }
+
+  // Prevent values above physical prototype range
+  if (waterLevel > MAX_WATER_LEVEL_CM) {
+    waterLevel = MAX_WATER_LEVEL_CM;
+  }
+
+  return waterLevel;
+}
+
+// ============================================================
+// RAIN SENSOR CONVERSION
+// ============================================================
+
+float convertRainToPercent(int rainRaw) {
+
+  float rainIntensity =
+      ((ADC_MAX - (float)rainRaw) / ADC_MAX) * 100.0;
+
+  return constrain(
+      rainIntensity,
+      0.0,
+      100.0
+  );
+}
+
+// ============================================================
+// SOIL MOISTURE CONVERSION
+// ============================================================
+
+float convertSoilToPercent(int soilRaw) {
+
+  float soilMoisture =
+      ((ADC_MAX - (float)soilRaw) / ADC_MAX) * 100.0;
+
+  return constrain(
+      soilMoisture,
+      0.0,
+      100.0
+  );
+}
+
+// ============================================================
+// FLOOD CATEGORY
+// ============================================================
+
+String floodCategory(float risk) {
+
+  if (risk < 25.0) {
+    return "Low";
+  }
+
+  if (risk < 50.0) {
+    return "Moderate";
+  }
+
+  if (risk < 75.0) {
+    return "High";
+  }
+
+  return "Critical";
+}
+
+// ============================================================
+// AQI CATEGORY
+// ============================================================
+
+String aqiCategory(float aqi) {
+
+  if (aqi <= 50.0) {
+    return "Good";
+  }
+
+  if (aqi <= 100.0) {
+    return "Satisfactory";
+  }
+
+  if (aqi <= 200.0) {
+    return "Moderate";
+  }
+
+  if (aqi <= 300.0) {
+    return "Poor";
+  }
+
+  if (aqi <= 400.0) {
+    return "Very Poor";
+  }
+
+  return "Severe";
+}
+
+// ============================================================
+// WIFI
+// ============================================================
+
+void connectToWifi() {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  WiFi.mode(WIFI_STA);
+
+  WiFi.begin(
+      WIFI_SSID,
+      WIFI_PASSWORD
+  );
+
+  Serial.print("Connecting to WiFi");
+
+  unsigned long startAttempt =
+      millis();
+
+  while (
+      WiFi.status() != WL_CONNECTED &&
+      millis() - startAttempt < 20000
+  ) {
+
+    delay(500);
+
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    Serial.print("WiFi connected. IP: ");
+
+    Serial.println(
+        WiFi.localIP()
+    );
+  }
+  else {
+
+    Serial.println(
+        "WiFi connection failed."
+    );
+  }
+}
+
+// ============================================================
+// SEND TELEMETRY
+// ============================================================
+
+void sendTelemetry(
+    float temperature,
+    float humidity,
+    int mq2Raw,
+    int mq135Raw,
+    int rainRaw,
+    int soilRaw,
+    float rainIntensity,
+    float soilMoisture,
+    float waterDistance,
+    float waterLevel,
+    float floodRisk,
+    const String& floodStatus,
+    float aqi,
+    const String& aqiStatus,
+    bool alert
+) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectToWifi();
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+
+    Serial.println(
+        "Telemetry skipped: WiFi unavailable."
+    );
+
+    return;
+  }
+
+  StaticJsonDocument<1024> payload;
+
+  // ----------------------------------------------------------
+  // ENVIRONMENT
+  // ----------------------------------------------------------
+
+  if (isnan(temperature)) {
+    payload["temperature"] = nullptr;
+  }
+  else {
+    payload["temperature"] =
+        temperature;
+  }
+
+  if (isnan(humidity)) {
+    payload["humidity"] = nullptr;
+  }
+  else {
+    payload["humidity"] =
+        humidity;
+  }
+
+  // ----------------------------------------------------------
+  // RAW POLLUTION SENSOR VALUES
+  // ----------------------------------------------------------
+
+  payload["mq2Raw"] =
+      mq2Raw;
+
+  payload["mq135Raw"] =
+      mq135Raw;
+
+  // ----------------------------------------------------------
+  // RAW FLOOD SENSOR VALUES
+  // ----------------------------------------------------------
+
+  payload["rainRaw"] =
+      rainRaw;
+
+  payload["soilRaw"] =
+      soilRaw;
+
+  // ----------------------------------------------------------
+  // FLOOD MODEL INPUTS
+  // ----------------------------------------------------------
+
+  payload["rainIntensity"] =
+      rainIntensity;
+
+  payload["soilMoisture"] =
+      soilMoisture;
+
+  if (waterDistance >= 0.0) {
+
+    payload["waterDistance"] =
+        waterDistance;
+  }
+  else {
+
+    payload["waterDistance"] =
+        nullptr;
+  }
+
+  payload["waterLevel"] =
+      waterLevel;
+
+  // ----------------------------------------------------------
+  // EDGE AI RESULTS
+  // ----------------------------------------------------------
+
+  payload["floodRisk"] =
+      floodRisk;
+
+  payload["floodCategory"] =
+      floodStatus;
+
+  payload["aqi"] =
+      aqi;
+
+  payload["aqiCategory"] =
+      aqiStatus;
+
+  // ----------------------------------------------------------
+  // ALERT
+  // ----------------------------------------------------------
+
+  payload["alert"] =
+      alert;
+
+  // ----------------------------------------------------------
+  // SERIALIZE JSON
+  // ----------------------------------------------------------
+
+  String body;
+
+  serializeJson(
+      payload,
+      body
+  );
+
+  // ----------------------------------------------------------
+  // HTTP POST
+  // ----------------------------------------------------------
+
+  HTTPClient http;
+
+  http.setTimeout(3000);
+
+  if (!http.begin(BACKEND_URL)) {
+
+    Serial.println(
+        "HTTP begin failed."
+    );
+
+    return;
+  }
+
+  http.addHeader(
+      "Content-Type",
+      "application/json"
+  );
+
+  int statusCode =
+      http.POST(body);
+
+  Serial.print(
+      "HTTP POST status: "
+  );
+
+  Serial.println(
+      statusCode
+  );
+
+  Serial.print(
+      "Payload: "
+  );
+
+  Serial.println(
+      body
+  );
+
+  http.end();
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  delay(500);
+
+  // ----------------------------------------------------------
+  // DHT11
+  // ----------------------------------------------------------
+
+  dht.begin();
+
+  // ----------------------------------------------------------
+  // HC-SR04
+  // ----------------------------------------------------------
+
+  pinMode(
+      TRIG_PIN,
+      OUTPUT
+  );
+
+  pinMode(
+      ECHO_PIN,
+      INPUT
+  );
+
+  digitalWrite(
+      TRIG_PIN,
+      LOW
+  );
+
+  // ----------------------------------------------------------
+  // ALERT HARDWARE
+  // ----------------------------------------------------------
+
+  pinMode(
+      BUZZER_PIN,
+      OUTPUT
+  );
+
+  pinMode(
+      LED_PIN,
+      OUTPUT
+  );
+
+  digitalWrite(
+      BUZZER_PIN,
+      LOW
+  );
+
+  digitalWrite(
+      LED_PIN,
+      LOW
+  );
+
+  // ----------------------------------------------------------
+  // WIFI
+  // ----------------------------------------------------------
+
+  // connectToWifi();
+
+  // ----------------------------------------------------------
+  // STARTUP MESSAGE
+  // ----------------------------------------------------------
+
+  Serial.println();
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.println(
+      " AI ENVIRONMENTAL MONITORING SYSTEM"
+  );
+
+  Serial.println(
+      " ESP32 EDGE AI SENSOR SYSTEM"
+  );
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.println();
+
+  Serial.println(
+      "Ultrasonic calibration:"
+  );
+
+  Serial.print(
+      "Empty distance: "
+  );
+
+  Serial.print(
+      EMPTY_DISTANCE_CM,
+      2
+  );
+
+  Serial.println(
+      " cm"
+  );
+
+  Serial.println();
+
+  delay(1000);
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop() {
+
+  // ==========================================================
+  // 1. READ SENSORS
+  // ==========================================================
+
+  float temperature =
+      dht.readTemperature();
+
+  float humidity =
+      dht.readHumidity();
+
+  int mq2Raw =
+      analogRead(MQ2_PIN);
+
+  int mq135Raw =
+      analogRead(MQ135_PIN);
+
+  int rainRaw =
+      analogRead(RAIN_PIN);
+
+  int soilRaw =
+      analogRead(SOIL_PIN);
+
+  // Give the ultrasonic sensor a clean measurement window
+  delay(200);
+
+  float waterDistance =
+      getWaterDistance();
+
+  // ==========================================================
+  // 2. CALCULATE ACTUAL WATER LEVEL
+  // ==========================================================
+
+  float waterLevel =
+      calculateWaterLevel(
+          waterDistance
+      );
+
+  // ==========================================================
+  // 3. CONVERT FLOOD SENSOR VALUES
+  // ==========================================================
+
+  float rainIntensity =
+      convertRainToPercent(
+          rainRaw
+      );
+
+  float soilMoisture =
+      convertSoilToPercent(
+          soilRaw
+      );
+
+  // ==========================================================
+  // 4. PREPARE FLOOD MODEL INPUT
+  // ==========================================================
+
+  int16_t floodFeatures[5];
+
+  floodFeatures[0] =
+      isnan(temperature)
+      ? 0
+      : (int16_t)round(
+          temperature
+        );
+
+  floodFeatures[1] =
+      isnan(humidity)
+      ? 0
+      : (int16_t)round(
+          humidity
+        );
+
+  floodFeatures[2] =
+      (int16_t)round(
+          rainIntensity
+      );
+
+  floodFeatures[3] =
+      (int16_t)round(
+          soilMoisture
+      );
+
+  floodFeatures[4] =
+      (int16_t)round(
+          waterLevel
+      );
+
+  // ==========================================================
+  // 5. FLOOD MODEL INPUT DEBUG
+  // ==========================================================
+
+  Serial.println();
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.println(
+      " FLOOD MODEL INPUTS"
+  );
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.print(
+      "Temperature: "
+  );
+
+  Serial.println(
+      floodFeatures[0]
+  );
+
+  Serial.print(
+      "Humidity: "
+  );
+
+  Serial.println(
+      floodFeatures[1]
+  );
+
+  Serial.print(
+      "Rain: "
+  );
+
+  Serial.println(
+      floodFeatures[2]
+  );
+
+  Serial.print(
+      "Soil: "
+  );
+
+  Serial.println(
+      floodFeatures[3]
+  );
+
+  Serial.print(
+      "Water level: "
+  );
+
+  Serial.println(
+      floodFeatures[4]
+  );
+
+  Serial.println(
+      "=========================================="
+  );
+
+  // ==========================================================
+  // 6. FLOOD EDGE AI INFERENCE
+  // ==========================================================
+
+  float floodRisk =
+      flood_model_predict(
+          floodFeatures,
+          5
+      );
+
+  floodRisk =
+      constrain(
+          floodRisk,
+          0.0,
+          100.0
+      );
+
+  String floodStatus =
+      floodCategory(
+          floodRisk
+      );
+
+  // ==========================================================
+  // 7. PREPARE AQI MODEL INPUT
+  // ==========================================================
+
+  int16_t aqiFeatures[4];
+
+  aqiFeatures[0] =
+      isnan(temperature)
+      ? 0
+      : (int16_t)round(
+          temperature
+        );
+
+  aqiFeatures[1] =
+      isnan(humidity)
+      ? 0
+      : (int16_t)round(
+          humidity
+        );
+
+  aqiFeatures[2] =
+      (int16_t)mq2Raw;
+
+  aqiFeatures[3] =
+      (int16_t)mq135Raw;
+
+  // ==========================================================
+  // 8. AQI EDGE AI INFERENCE
+  // ==========================================================
+
+  float aqi =
+      aqi_model_predict(
+          aqiFeatures,
+          4
+      );
+
+  aqi =
+      constrain(
+          aqi,
+          0.0,
+          500.0
+      );
+
+  String aqiStatus =
+      aqiCategory(
+          aqi
+      );
+
+  // ==========================================================
+  // 9. ALERT LOGIC
+  // ==========================================================
+
+  bool floodAlert =
+      floodRisk >= 50.0;
+
+  bool pollutionAlert =
+      aqi > 100.0;
+
+  bool alert =
+      floodAlert ||
+      pollutionAlert;
+
+  // ==========================================================
+  // 10. HARDWARE ALERT
+  // ==========================================================
+
+  if (alert) {
+
+    digitalWrite(
+        LED_PIN,
+        HIGH
+    );
+
+    digitalWrite(
+        BUZZER_PIN,
+        HIGH
+    );
+  }
+  else {
+
+    digitalWrite(
+        LED_PIN,
+        LOW
+    );
+
+    digitalWrite(
+        BUZZER_PIN,
+        LOW
+    );
+  }
+
+  // ==========================================================
+  // 11. SERIAL SENSOR READINGS
+  // ==========================================================
+
+  Serial.println();
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.println(
+      " SENSOR READINGS"
+  );
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.print(
+      "Temperature (C): "
+  );
+
+  if (isnan(temperature)) {
+    Serial.println(
+        "ERROR"
+    );
+  }
+  else {
+    Serial.println(
+        temperature
+    );
+  }
+
+  Serial.print(
+      "Humidity (%): "
+  );
+
+  if (isnan(humidity)) {
+    Serial.println(
+        "ERROR"
+    );
+  }
+  else {
+    Serial.println(
+        humidity
+    );
+  }
+
+  Serial.print(
+      "MQ-2 raw: "
+  );
+
+  Serial.println(
+      mq2Raw
+  );
+
+  Serial.print(
+      "MQ-135 raw: "
+  );
+
+  Serial.println(
+      mq135Raw
+  );
+
+  Serial.print(
+      "Rain raw: "
+  );
+
+  Serial.println(
+      rainRaw
+  );
+
+  Serial.print(
+      "Rain intensity (%): "
+  );
+
+  Serial.println(
+      rainIntensity
+  );
+
+  Serial.print(
+      "Soil raw: "
+  );
+
+  Serial.println(
+      soilRaw
+  );
+
+  Serial.print(
+      "Soil moisture (%): "
+  );
+
+  Serial.println(
+      soilMoisture
+  );
+
+  Serial.print(
+      "Water distance (cm): "
+  );
+
+  if (waterDistance < 0.0) {
+    Serial.println(
+        "ERROR"
+    );
+  }
+  else {
+    Serial.println(
+        waterDistance,
+        2
+    );
+  }
+
+  Serial.print(
+      "Water level (cm): "
+  );
+
+  Serial.println(
+      waterLevel,
+      2
+  );
+
+  // ==========================================================
+  // 12. EDGE AI OUTPUT
+  // ==========================================================
+
+  Serial.println();
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.println(
+      " EDGE AI INFERENCE"
+  );
+
+  Serial.println(
+      "=========================================="
+  );
+
+  Serial.println(
+      "--- FLOOD MODEL ---"
+  );
+
+  Serial.print(
+      "Flood risk: "
+  );
+
+  Serial.print(
+      floodRisk,
+      1
+  );
+
+  Serial.println(
+      "/100"
+  );
+
+  Serial.print(
+      "Flood category: "
+  );
+
+  Serial.println(
+      floodStatus
+  );
+
+  Serial.println();
+
+  Serial.println(
+      "--- AQI MODEL ---"
+  );
+
+  Serial.print(
+      "Predicted AQI: "
+  );
+
+  Serial.println(
+      aqi,
+      1
+  );
+
+  Serial.print(
+      "AQI category: "
+  );
+
+  Serial.println(
+      aqiStatus
+  );
+
+  Serial.println();
+
+  Serial.print(
+      "Flood alert: "
+  );
+
+  Serial.println(
+      floodAlert
+      ? "YES"
+      : "NO"
+  );
+
+  Serial.print(
+      "Pollution alert: "
+  );
+
+  Serial.println(
+      pollutionAlert
+      ? "YES"
+      : "NO"
+  );
+
+  Serial.print(
+      "SYSTEM ALERT: "
+  );
+
+  Serial.println(
+      alert
+      ? "YES"
+      : "NO"
+  );
+
+  // ==========================================================
+  // 13. SEND DATA TO BACKEND
+  // ==========================================================
+
+  if (
+      millis() - lastSendMs
+      >= SEND_INTERVAL_MS
+  ) {
+
+    lastSendMs =
+        millis();
+
+    /*sendTelemetry(
+        temperature,
+        humidity,
+        mq2Raw,
+        mq135Raw,
+        rainRaw,
+        soilRaw,
+        rainIntensity,
+        soilMoisture,
+        waterDistance,
+        waterLevel,
+        floodRisk,
+        floodStatus,
+        aqi,
+        aqiStatus,
+        alert
+    );*/
+  }
+
+  // ==========================================================
+  // 14. LOOP DELAY
+  // ==========================================================
+
+  delay(2000);
+}

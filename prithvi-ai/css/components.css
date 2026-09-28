@@ -84,6 +84,9 @@ canvas.spark{ width:100%; height:46px; display:block; margin-top:10px; }
 .btn-sm{ padding:6px 12px; font-size:12.5px; }
 .btn[disabled]{ opacity:0.45; cursor:not-allowed; }
 .btn-row{ display:flex; gap:10px; flex-wrap:wrap; }
+.demo-toggle{ display:flex; align-items:center; gap:10px; }
+.demo-reset{ white-space:nowrap; }
+.demo-scenario{ white-space:nowrap; }
 
 /* --- Badges / tags --- */
 .tag{
@@ -112,6 +115,43 @@ canvas.spark{ width:100%; height:46px; display:block; margin-top:10px; }
 .alert-icon{ width:22px; height:22px; flex:0 0 auto; color:var(--danger); margin-top:1px; }
 .alert-banner.warning .alert-icon{ color:var(--warn); }
 .alert-banner.safe .alert-icon{ color:var(--safe); }
+
+.route-map-wrap{
+  margin:0 0 20px;
+  background:var(--bg-panel);
+  border:1px solid var(--border-soft);
+  border-radius:var(--radius);
+  overflow:hidden;
+}
+.route-map-header{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:12px 16px 8px; font-size:12.5px; color:var(--text-dim); font-weight:700;
+}
+.route-map-actions{ display:flex; align-items:center; justify-content:flex-end; gap:12px; flex-wrap:wrap; }
+.map-view-switch{ display:flex; padding:2px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-panel-2); }
+.map-view-btn{ border:0; border-radius:calc(var(--radius) - 2px); padding:5px 9px; color:var(--text-dim); background:transparent; font:inherit; font-size:11px; cursor:pointer; }
+.map-view-btn.active{ color:var(--text); background:var(--signal); }
+.route-legend{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.route-pill{
+  display:inline-flex; align-items:center; gap:6px;
+  padding:4px 8px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid transparent;
+}
+.route-pill-a{ background:rgba(74,163,255,0.12); color:#8ac7ff; border-color:rgba(74,163,255,0.45); }
+.route-pill-b{ background:rgba(57,208,143,0.12); color:#8ae7c1; border-color:rgba(57,208,143,0.45); }
+.route-map{ width:100%; height:240px; display:block; background:linear-gradient(180deg, rgba(11,21,31,0.9), rgba(15,28,37,0.85)); }
+.real-route-map{ display:none; height:360px; width:100%; background:#dbe7e7; }
+.real-route-map.is-visible{ display:block; }
+.route-map-wrap.real-active .route-map{ display:none; }
+.route-map-wrap.real-active .real-route-map{ display:block; }
+.leaflet-container{ font-family:var(--font-body); }
+.leaflet-control-attribution{ font-size:9px; }
+.pollution-advisory{ padding:10px 16px; border-top:1px solid rgba(255,179,110,0.35); color:#ffd8b0; background:rgba(181,91,51,0.16); font-size:12px; line-height:1.45; }
+.route-map text{ letter-spacing:0.02em; }
+@media (max-width:560px){
+  .route-map-header{ align-items:flex-start; flex-direction:column; }
+  .route-map-actions{ justify-content:flex-start; }
+  .route-map{ height:auto; min-height:210px; }
+}
 
 /* --- Section card (drills/videos/quiz landing) --- */
 .mod-card{

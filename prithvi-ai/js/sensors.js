@@ -25,11 +25,75 @@
     risk: { flood:"normal", fire:"normal", pollution:"normal", overall:"normal" },
     riskScore: { flood:5, fire:5, pollution:8 },
     trend: { flood:"flat", fire:"flat", pollution:"flat" },
+    route: { mode:"normal", title:"Primary route active", route:"Route A — Main corridor remains open", shelter:"Rain shelter not required", note:"No flood reroute required." },
     event: null,          // { hazard, phase:'rising'|'recovering', elapsed, duration }
     listeners: [],
     loopHandle: null,
     demo: false,
+    demoFloodShown: false,
+    demoPaused: false,
+    demoScenario: null,
   };
+
+  function normalizeHardwarePayload(payload){
+    if(!payload || typeof payload !== "object") return null;
+
+    const rainRaw = Number(payload.rainRaw ?? payload.rain ?? 0);
+    const soilRaw = Number(payload.soilRaw ?? payload.soil ?? 0);
+    const waterLevelCm = Number(payload.waterLevel ?? payload.water ?? 0);
+    const mq2Raw = Number(payload.mq2Raw ?? payload.mq2 ?? 0);
+    const mq135Raw = Number(payload.mq135Raw ?? payload.mq135 ?? 0);
+    const temperature = Number(payload.temperature ?? 29);
+    const humidity = Number(payload.humidity ?? 48);
+
+    const waterLevelM = Number.isFinite(waterLevelCm) ? clamp(waterLevelCm / 100, 0.2, 8) : 1.2;
+    const rainfallPercent = Number.isFinite(rainRaw) ? clamp(((4095 - rainRaw) / 4095) * 100, 0, 100) : 4;
+    const soilPercent = Number.isFinite(soilRaw) ? clamp(((4095 - soilRaw) / 4095) * 100, 0, 100) : 38;
+    const floodLevel = Number.isFinite(waterLevelCm) ? clamp((waterLevelCm / 9) * 100, 0, 100) : 18;
+
+    return {
+      flood: {
+        waterLevel: clamp(waterLevelM, 0.2, 8),
+        rainfall: clamp(rainfallPercent, 0, 90),
+        riseRate: clamp(waterLevelCm > 4 ? 0.25 : 0.02, 0, 1),
+        flowRate: clamp(Math.round((waterLevelCm * 2.4) + (rainfallPercent * 1.2)), 0, 220),
+      },
+      fire: {
+        temperature: clamp(Number.isFinite(temperature) ? temperature : 29, 18, 60),
+        humidity: clamp(Number.isFinite(humidity) ? humidity : 48, 8, 90),
+        smoke: clamp((mq2Raw / 10) || 6, 0, 100),
+        wind: clamp((rainfallPercent * 0.1) + 5, 0, 55),
+      },
+      pollution: {
+        aqi: clamp(Number.isFinite(mq135Raw) ? mq135Raw * 0.45 : 62, 15, 420),
+        pm25: clamp(Number.isFinite(mq135Raw) ? mq135Raw * 0.22 : 28, 5, 260),
+        pm10: clamp(Number.isFinite(mq2Raw) ? mq2Raw * 0.33 : 55, 10, 400),
+        visibility: clamp(10 - ((Number.isFinite(mq135Raw) ? mq135Raw * 0.45 : 62) / 50), 0.3, 10),
+      },
+      floodLevel,
+      soilPercent,
+    };
+  }
+
+  function deriveRouteDecision(floodValues){
+    const floodRisk = Number(floodValues.waterLevel) > 2.8 || Number(floodValues.rainfall) > 65;
+    if(floodRisk){
+      return {
+        mode:"reroute",
+        title:"Rain shelter reroute active",
+        route:"Route B — Elevated rain shelter via Ridge Road",
+        shelter:"Shelter: Community Hall, Ridge Road (2.1 km, high ground)",
+        note:"Low-lying roads are flooding. Move to the higher ground shelter and avoid standing water.",
+      };
+    }
+    return {
+      mode:"normal",
+      title:"Primary route active",
+      route:"Route A — Main corridor remains open",
+      shelter:"Rain shelter not required",
+      note:"Conditions are stable and the usual route remains safe.",
+    };
+  }
 
   function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 
@@ -101,14 +165,24 @@
     let worst = "normal";
     HAZARDS.forEach(h=>{ if(order[state.risk[h]] > order[worst]) worst = state.risk[h]; });
     state.risk.overall = worst;
+    state.route = deriveRouteDecision(state.values.flood);
   }
 
   /* ---- demo-mode scripted event: pick a hazard, ramp up, then recover ---- */
   function maybeStartEvent(){
     if(state.event) return;
+    if(state.demoPaused) return;
+    if(state.demoScenario === "pollution"){
+      state.event = { hazard:"pollution", phase:"rising", elapsed:0, duration: PRITHVI.rand(10,16) };
+      return;
+    }
+    if(state.demo && !state.demoFloodShown){
+      state.demoFloodShown = true;
+      state.event = { hazard:"flood", phase:"rising", elapsed:0, duration: PRITHVI.rand(14,22) };
+      return;
+    }
     if(Math.random() < 0.35){
-      const hazard = HAZARDS[Math.floor(Math.random()*HAZARDS.length)];
-      state.event = { hazard, phase:"rising", elapsed:0, duration: PRITHVI.rand(14,22) };
+      state.event = { hazard:HAZARDS[Math.floor(Math.random()*HAZARDS.length)], phase:"rising", elapsed:0, duration: PRITHVI.rand(14,22) };
     }
   }
 
@@ -116,13 +190,28 @@
     if(!state.event) return;
     const ev = state.event;
     ev.elapsed += dtSec;
-    const bias = ev.phase === "rising" ? 1 : -1;
+    const bias = ev.phase === "rising" ? 1 : 0;
     driftHazard(ev.hazard, bias);
     if(ev.phase === "rising" && ev.elapsed >= ev.duration){
-      ev.phase = "recovering"; ev.elapsed = 0; ev.duration = PRITHVI.rand(16,24);
-    } else if(ev.phase === "recovering" && ev.elapsed >= ev.duration){
-      state.event = null;
+      ev.phase = "holding"; ev.elapsed = 0;
     }
+  }
+
+  function resetDemo(){
+    state.values = JSON.parse(JSON.stringify(baseline));
+    state.history = { flood:[], fire:[], pollution:[] };
+    state.risk = { flood:"normal", fire:"normal", pollution:"normal", overall:"normal" };
+    state.riskScore = { flood:5, fire:5, pollution:8 };
+    state.trend = { flood:"flat", fire:"flat", pollution:"flat" };
+    state.event = null;
+    state.demoFloodShown = false;
+    state.demoPaused = true;
+    state.demoScenario = null;
+    for(let i=0;i<HISTORY_LEN;i++){
+      HAZARDS.forEach(h=>{ updateRisk(h); pushHistory(h); });
+    }
+    updateOverall();
+    notify();
   }
 
   /* ---- one full sample tick across all hazards ---- */
@@ -165,8 +254,26 @@
     subscribe(fn){ state.listeners.push(fn); },
     setDemo(on){
       state.demo = on;
+      if(on) state.demoPaused = false;
+      if(on) state.demoFloodShown = false;
       if(on) startLoop(); else stopLoop();
     },
+    startScenario(scenario){
+      state.demo = true;
+      state.demoPaused = false;
+      state.demoScenario = scenario === "pollution" ? "pollution" : "flood";
+      state.event = null;
+      state.demoFloodShown = state.demoScenario === "pollution";
+      if(state.demoScenario === "pollution"){
+        state.values.pollution = { aqi:62, pm25:28, pm10:55, visibility:6.4 };
+      } else {
+        state.values.flood = { waterLevel:1.2, rainfall:4, riseRate:0.02, flowRate:18 };
+      }
+      updateOverall();
+      notify();
+      startLoop();
+    },
+    resetDemo,
     refreshOnce(){ sampleOnce(1); }, // manual "Refresh readings" — small variation, no event
     levelFromScore,
   };

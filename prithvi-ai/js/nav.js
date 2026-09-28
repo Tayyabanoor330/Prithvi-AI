@@ -47,6 +47,17 @@
     // Demo mode switch
     const sw = document.getElementById("demo-switch");
     const label = document.getElementById("demo-label");
+    const reset = document.getElementById("demo-reset");
+    const floodDemo = document.getElementById("flood-demo");
+    const pollutionDemo = document.getElementById("pollution-demo");
+
+    function startScenario(scenario, labelText){
+      PRITHVI.state.demoMode = true;
+      sw.classList.add("on");
+      label.innerHTML = "Demo Mode: <strong>ON</strong>";
+      if(PRITHVI.sensors) PRITHVI.sensors.startScenario(scenario);
+      PRITHVI.toast(labelText + " started — scenario will hold for the demonstration.", "safe");
+    }
     sw.addEventListener("click", ()=>{
       PRITHVI.state.demoMode = !PRITHVI.state.demoMode;
       sw.classList.toggle("on", PRITHVI.state.demoMode);
@@ -54,6 +65,12 @@
       PRITHVI.toast(PRITHVI.state.demoMode ? "Demo mode enabled — sensor values will now evolve live." : "Demo mode disabled — readings frozen.", "safe");
       if(PRITHVI.sensors) PRITHVI.sensors.setDemo(PRITHVI.state.demoMode);
     });
+    reset.addEventListener("click", ()=>{
+      if(PRITHVI.sensors) PRITHVI.sensors.resetDemo();
+      PRITHVI.toast("Demo reset — readings returned to normal and are paused.", "safe");
+    });
+    floodDemo.addEventListener("click", ()=>startScenario("flood", "Flood demo"));
+    pollutionDemo.addEventListener("click", ()=>startScenario("pollution", "Pollution demo"));
   });
 
 })();

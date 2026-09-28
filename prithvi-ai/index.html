@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="css/games.css">
 <link rel="stylesheet" href="css/drills-visual.css">
 <link rel="stylesheet" href="css/drills-visual.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 </head>
 <body>
 
@@ -34,6 +35,9 @@
     <div class="demo-toggle">
       <span id="demo-label">Demo Mode: <strong>OFF</strong></span>
       <button class="switch" id="demo-switch" aria-label="Toggle demo mode"></button>
+      <button class="btn btn-ghost btn-sm demo-scenario" id="flood-demo" type="button">Flood demo</button>
+      <button class="btn btn-ghost btn-sm demo-scenario" id="pollution-demo" type="button">Pollution demo</button>
+      <button class="btn btn-ghost btn-sm demo-reset" id="demo-reset" type="button">Reset demo</button>
     </div>
   </div>
 
@@ -99,6 +103,98 @@
           </div>
           <div class="risk-labels"><span>NORMAL</span><span>WARNING</span><span>HIGH RISK</span><span>CRITICAL</span></div>
         </div>
+      </div>
+
+      <div class="panel" id="route-panel" style="margin-top:16px; margin-bottom:16px;"></div>
+
+      <div class="route-map-wrap">
+        <div class="route-map-header">
+          <span>Rain shelter rerouting map</span>
+          <div class="route-map-actions">
+            <div class="map-view-switch" role="group" aria-label="Map view">
+              <button class="map-view-btn active" type="button" data-map-view="schematic">Diagram</button>
+              <button class="map-view-btn" type="button" data-map-view="real">Central Delhi</button>
+            </div>
+            <div class="route-legend">
+            <span class="route-pill route-pill-a">Route A</span>
+            <span class="route-pill route-pill-b">Route B</span>
+            </div>
+          </div>
+        </div>
+        <svg id="route-map" class="route-map" viewBox="0 0 620 240" aria-label="Map showing Route A and Route B to the rain shelter">
+          <defs>
+            <pattern id="cityGrid" width="34" height="34" patternUnits="userSpaceOnUse">
+              <path d="M34 0H0V34" fill="none" stroke="#29404e" stroke-width="1"/>
+            </pattern>
+            <linearGradient id="roadFade" x1="0" x2="1">
+              <stop offset="0%" stop-color="#30495f"/>
+              <stop offset="100%" stop-color="#243f50"/>
+            </linearGradient>
+          </defs>
+          <rect x="0" y="0" width="620" height="240" rx="18" fill="#10222d"/>
+          <rect x="0" y="0" width="620" height="240" rx="18" fill="url(#cityGrid)" opacity="0.62"/>
+
+          <g fill="#1d3540" stroke="#35515c" stroke-width="1">
+            <rect x="28" y="22" width="105" height="52" rx="5"/><rect x="222" y="18" width="92" height="46" rx="5"/>
+            <rect x="400" y="24" width="104" height="48" rx="5"/><rect x="32" y="88" width="110" height="44" rx="5"/>
+            <rect x="276" y="102" width="64" height="34" rx="5"/><rect x="475" y="168" width="112" height="48" rx="5"/>
+          </g>
+          <g fill="#73909a" font-size="9" opacity="0.82">
+            <text x="80" y="51" text-anchor="middle">Old Market</text><text x="268" y="45" text-anchor="middle">Civic Centre</text>
+            <text x="452" y="52" text-anchor="middle">East Ward</text><text x="87" y="114" text-anchor="middle">Riverside</text>
+            <text x="308" y="123" text-anchor="middle">Clinic</text><text x="531" y="195" text-anchor="middle">Hill Colony</text>
+          </g>
+          <path d="M0 132 C95 120, 130 140, 188 128 S310 120, 370 132 S510 124, 620 138 L620 166 C520 152, 460 161, 370 150 S210 147, 130 158 S45 151, 0 160Z" fill="#17495a" opacity="0.9"/>
+          <text x="18" y="151" fill="#7bc7d5" font-size="9" font-weight="700">RIVER FLOOD ZONE</text>
+
+          <g opacity="0.92">
+            <path d="M60 170 L190 170 L260 110 L360 80 L475 145 L545 90" fill="none" stroke="url(#roadFade)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M90 200 L215 190 L310 165 L430 175 L515 140" fill="none" stroke="url(#roadFade)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M190 40 L190 200 M360 30 L360 210" fill="none" stroke="url(#roadFade)" stroke-width="18" stroke-linecap="round"/>
+          </g>
+          <g fill="#9bb1b9" font-size="9" font-weight="700" opacity="0.88">
+            <text x="250" y="101" transform="rotate(-25 250 101)">Main Corridor</text>
+            <text x="330" y="183" transform="rotate(-4 330 183)">Ridge Road</text>
+            <text x="177" y="92" transform="rotate(-90 177 92)">Central Avenue</text>
+          </g>
+          <path id="routeA" d="M60 170 L190 170 L260 110 L360 80 L475 145 L545 90" fill="none" stroke="#4aa3ff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          <path id="routeB" d="M60 170 L180 190 L310 165 L430 175 L515 140 L545 90" fill="none" stroke="#39d08f" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity="0.38"/>
+          <g id="route-blocked" opacity="0" aria-label="Route A blocked by floodwater">
+            <circle cx="360" cy="80" r="17" fill="#b8444d" stroke="#ffd0d0" stroke-width="3"/>
+            <path d="M351 71l18 18M369 71l-18 18" stroke="#fff4f4" stroke-width="3" stroke-linecap="round"/>
+            <rect x="330" y="43" width="60" height="18" rx="9" fill="#b8444d"/>
+            <text x="360" y="56" text-anchor="middle" fill="#fff4f4" font-size="9" font-weight="700">BLOCKED</text>
+          </g>
+          <g id="pollution-zones" opacity="0" aria-label="High pollution regions">
+            <ellipse cx="130" cy="102" rx="76" ry="34" fill="#c46a42" opacity="0.42" stroke="#ffb36e" stroke-width="2" stroke-dasharray="6 5"/>
+            <ellipse cx="410" cy="83" rx="86" ry="30" fill="#c46a42" opacity="0.38" stroke="#ffb36e" stroke-width="2" stroke-dasharray="6 5"/>
+            <ellipse cx="390" cy="190" rx="92" ry="25" fill="#c46a42" opacity="0.32" stroke="#ffb36e" stroke-width="2" stroke-dasharray="6 5"/>
+            <text x="130" y="106" text-anchor="middle" fill="#ffe0bd" font-size="10" font-weight="700">HIGH AQI ZONE</text>
+            <text x="410" y="87" text-anchor="middle" fill="#ffe0bd" font-size="10" font-weight="700">HIGH AQI ZONE</text>
+            <text x="390" y="194" text-anchor="middle" fill="#ffe0bd" font-size="10" font-weight="700">LIMIT OUTDOOR ACTIVITY</text>
+          </g>
+
+          <circle cx="60" cy="170" r="10" fill="#d8eaff"/>
+          <circle cx="545" cy="88" r="12" fill="#7ce5b9"/>
+
+          <g class="route-labels">
+            <g>
+              <rect x="210" y="100" width="22" height="22" rx="11" fill="#4aa3ff"/>
+              <text x="221" y="116" text-anchor="middle" fill="#06151b" font-size="12" font-weight="700">A</text>
+            </g>
+            <g>
+              <rect x="450" y="130" width="22" height="22" rx="11" fill="#39d08f"/>
+              <text x="461" y="146" text-anchor="middle" fill="#06151b" font-size="12" font-weight="700">B</text>
+            </g>
+          </g>
+
+          <text x="40" y="190" fill="#dfeaf7" font-size="11" font-weight="700">Start</text>
+          <rect x="500" y="92" width="84" height="34" rx="10" fill="rgba(53,209,141,0.2)" stroke="rgba(124,229,185,0.8)"/>
+          <text x="542" y="114" text-anchor="middle" fill="#dffdf2" font-size="11" font-weight="700">RAIN SHELTER</text>
+          <g aria-hidden="true"><rect x="14" y="16" width="28" height="54" rx="7" fill="rgba(7,16,23,0.78)" stroke="#45616b"/><text x="28" y="37" text-anchor="middle" fill="#dfeaf7" font-size="16" font-weight="700">+</text><path d="M21 49h14" stroke="#8da5ad"/><text x="28" y="64" text-anchor="middle" fill="#dfeaf7" font-size="16" font-weight="700">-</text></g>
+        </svg>
+        <div id="real-route-map" class="real-route-map" aria-label="Central Delhi route map"></div>
+        <div id="pollution-advisory" class="pollution-advisory" hidden>Indoor advisory: remain indoors, avoid strenuous outdoor activity, and keep windows closed while air quality is hazardous.</div>
       </div>
 
       <div class="grid grid-3" id="hazard-card-grid">
@@ -453,6 +549,7 @@
 </div>
 
 <div id="toast-stack"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
 <script src="js/state.js"></script>
 <script src="js/content.js"></script>
