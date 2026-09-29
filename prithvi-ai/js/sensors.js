@@ -33,6 +33,9 @@
     demoFloodShown: false,
     demoPaused: false,
     demoScenario: null,
+    hardwareMode: false,
+    device: { status:"waiting", connected:false, updatedAt:null, telemetry:null, error:null },
+    hardwareHistory: [],
   };
 
   function normalizeHardwarePayload(payload){
@@ -153,7 +156,23 @@
 
   function updateRisk(hazard){
     const prevScore = state.riskScore[hazard];
-    const s = scorers[hazard](state.values[hazard]);
+    let s = scorers[hazard](state.values[hazard]);
+    if(state.hardwareMode && state.device.telemetry){
+      const t = state.device.telemetry;
+      if(hazard === "flood"){
+        s = Number.isFinite(t.floodRisk) ? clamp(t.floodRisk,0,100) :
+          clamp((t.waterPercent || 0)*0.55 + (t.rainPercent || 0)*0.3 + (t.soilPercent || 0)*0.15,0,100);
+      } else if(hazard === "fire"){
+        const temperature = Number.isFinite(t.temperature) ? t.temperature : 20;
+          const smokeSignal = Number.isFinite(t.mq2Raw)
+            ? (t.mq2Raw >= 1050 ? 80 : t.mq2Raw >= 700 ? 50 : t.mq2Raw >= 500 ? 25 : t.mq2Raw/20)
+            : 0;
+          s = clamp(clamp((temperature-25)/30*55,0,55) + smokeSignal*0.45,0,100);
+      } else if(hazard === "pollution"){
+          s = Number.isFinite(t.aqi) ? clamp(t.aqi/400*100,0,100) :
+          clamp((t.mq135Raw || 0)/4095*100,0,100);
+      }
+    }
     state.riskScore[hazard] = s;
     state.risk[hazard] = levelFromScore(s);
     const delta = s - prevScore;
@@ -165,7 +184,136 @@
     let worst = "normal";
     HAZARDS.forEach(h=>{ if(order[state.risk[h]] > order[worst]) worst = state.risk[h]; });
     state.risk.overall = worst;
-    state.route = deriveRouteDecision(state.values.flood);
+    state.route = state.hardwareMode
+      ? (state.risk.flood === "high" || state.risk.flood === "critical"
+        ? { mode:"reroute", title:"Rain shelter reroute active", route:"Route B — Elevated rain shelter via Ridge Road", shelter:"Shelter: Community Hall, Ridge Road (2.1 km, high ground)", note:"Live ESP32 flood-risk readings indicate elevated risk. Avoid low-lying roads and standing water." }
+        : state.risk.flood === "warning"
+          ? { mode:"warning", title:"Flood conditions require monitoring", route:"Route A remains active; check access to the elevated Route B", shelter:"Identify the nearest high-ground shelter", note:"The edge model reports rising flood risk. Avoid drains and low crossings, and prepare to move if conditions worsen." }
+          : { mode:"normal", title:"Primary route active", route:"Route A — Main corridor remains open", shelter:"Rain shelter not required", note:"ESP32 flood model currently reports low risk." })
+      : deriveRouteDecision(state.values.flood);
+  }
+
+  function asFinite(value){
+    const number = Number(value);
+    return value === null || value === undefined || value === "" || !Number.isFinite(number) ? null : number;
+  }
+
+  function buildHardwareSample(entry){
+    const t = entry.telemetry || entry;
+    const sensors = entry.sensors || {};
+    const waterValid = entry.waterValid !== false && t.waterValid !== false;
+    const rainPercent = asFinite(t.rainIntensity) ?? asFinite(sensors.rain) ?? 0;
+    const soilPercent = asFinite(t.soilMoisture) ?? asFinite(sensors.soil) ?? 0;
+    const waterLevelCm = waterValid ? (asFinite(t.waterLevelCm) ?? 0) : null;
+    const mq2Raw = asFinite(t.mq2Raw) ?? asFinite(sensors.mq2) ?? 0;
+    const mq135Raw = asFinite(t.mq135Raw) ?? asFinite(sensors.mq135) ?? 0;
+    const aqi = asFinite(t.aqi);
+    const temperature = asFinite(t.temperature);
+    const humidity = asFinite(t.humidity);
+    const floodRisk = asFinite(t.floodRisk);
+    const waterPercent = waterValid
+      ? (asFinite(t.waterPercent) ?? asFinite(sensors.water) ?? 0)
+      : null;
+    const timestamp = Date.parse(entry.updatedAt || new Date().toISOString());
+
+    return {
+      t: Number.isFinite(timestamp) ? timestamp : Date.now(),
+      telemetry: {
+        temperature, humidity, mq2Raw, mq135Raw,
+        rainRaw:asFinite(t.rainRaw), soilRaw:asFinite(t.soilRaw),
+        rainPercent, soilPercent, waterValid,
+        waterDistanceCm:waterValid ? asFinite(t.waterDistanceCm) : null,
+        waterLevelCm, waterPercent, floodRisk,
+        floodCategory:t.floodCategory || null, aqi,
+        aqiCategory:t.aqiCategory || null, alert:t.alert === true,
+      },
+      values: {
+        flood:{ waterLevel:waterLevelCm, rainfall:rainPercent, riseRate:null, flowRate:null },
+        fire:{ temperature, humidity, smoke:mq2Raw, wind:null },
+        pollution:{ aqi, pm25:null, pm10:null, visibility:null },
+      },
+      scores:{
+        flood:floodRisk,
+        fire:temperature === null && mq2Raw === null ? null : clamp((temperature === null ? 0 : (temperature-25)/30*55) + (mq2Raw >= 1050 ? 80 : mq2Raw >= 700 ? 50 : mq2Raw >= 500 ? 25 : mq2Raw/20)*0.45,0,100),
+        pollution:aqi === null ? null : clamp(aqi/400*100,0,100),
+      }
+    };
+  }
+
+  function ingestHardware(payload){
+    if(!payload || payload.source !== "esp32") return false;
+    const updatedAt = payload.updatedAt || null;
+    const timestamp = Date.parse(updatedAt || "");
+    if(!Number.isFinite(timestamp) || Date.now()-timestamp > 15000 || timestamp > Date.now()+5000){
+      setHardwareStatus("stale", "Last ESP32 reading is older than 15 seconds.");
+      return false;
+    }
+    if(state.demo) return false;
+    if(state.device.updatedAt === updatedAt && state.device.connected) return true;
+
+    const records = Array.isArray(payload.history)
+      ? payload.history.filter(item=>item.source === "esp32").slice(-HISTORY_LEN)
+      : [];
+    if(records.length){
+      state.history = { flood:[], fire:[], pollution:[] };
+      records.forEach(record=>{
+        const sample = buildHardwareSample(record);
+        HAZARDS.forEach(hazard=>{
+          const values = sample.values[hazard];
+          const score = sample.scores[hazard];
+          if(score === null) return;
+          state.history[hazard].push(Object.assign({t:sample.t}, values, {score}));
+        });
+      });
+    }
+
+    const sample = buildHardwareSample(payload);
+    const hardwareHistory = records.map(buildHardwareSample);
+    hardwareHistory.push(sample);
+    state.hardwareHistory = hardwareHistory
+      .filter((item,index,list)=>list.findIndex(candidate=>candidate.t === item.t) === index)
+      .slice(-HISTORY_LEN)
+      .map(item=>({t:item.t, ...item.telemetry}));
+    const previousFlood = state.values.flood.waterLevel;
+    const previousTime = state.device.updatedAt ? Date.parse(state.device.updatedAt) : null;
+    const hadHardwareSample = state.hardwareMode && Number.isFinite(previousTime);
+    if(hadHardwareSample && Number.isFinite(sample.values.flood.waterLevel) && Number.isFinite(previousFlood) && previousTime && sample.t > previousTime){
+      sample.values.flood.riseRate = clamp((sample.values.flood.waterLevel-previousFlood)*3600000/(sample.t-previousTime),-100,100);
+    }
+    state.hardwareMode = true;
+    state.device = { status:"connected", connected:true, updatedAt, telemetry:sample.telemetry, error:null };
+    state.values = sample.values;
+    HAZARDS.forEach(hazard=>{
+      if(sample.scores[hazard] !== null){
+        const old = state.riskScore[hazard];
+        state.riskScore[hazard] = sample.scores[hazard];
+        state.risk[hazard] = levelFromScore(sample.scores[hazard]);
+        state.trend[hazard] = !hadHardwareSample ? "flat" :
+          sample.scores[hazard] > old+1.2 ? "up" : sample.scores[hazard] < old-1.2 ? "down" : "flat";
+      } else {
+        state.riskScore[hazard] = 0;
+        state.risk[hazard] = "normal";
+        state.trend[hazard] = "flat";
+      }
+      if(sample.scores[hazard] !== null){
+        const point = Object.assign({t:sample.t}, sample.values[hazard], {score:sample.scores[hazard]});
+        const history = state.history[hazard];
+        if(!history.length || history[history.length-1].t !== sample.t) history.push(point);
+        if(history.length > HISTORY_LEN) history.shift();
+      }
+    });
+    updateOverall();
+    notify();
+    return true;
+  }
+
+  function setHardwareStatus(status, error){
+    const connected = status === "connected";
+    if(state.device.status === status && state.device.error === (error || null)) return;
+    state.device.status = status;
+    state.device.connected = connected;
+    state.device.error = error || null;
+    notify();
   }
 
   /* ---- demo-mode scripted event: pick a hazard, ramp up, then recover ---- */
@@ -198,6 +346,7 @@
   }
 
   function resetDemo(){
+    if(!state.demo && state.hardwareMode) return;
     state.values = JSON.parse(JSON.stringify(baseline));
     state.history = { flood:[], fire:[], pollution:[] };
     state.risk = { flood:"normal", fire:"normal", pollution:"normal", overall:"normal" };
@@ -254,13 +403,24 @@
     subscribe(fn){ state.listeners.push(fn); },
     setDemo(on){
       state.demo = on;
-      if(on) state.demoPaused = false;
-      if(on) state.demoFloodShown = false;
-      if(on) startLoop(); else stopLoop();
+      if(on){
+        state.hardwareMode = false;
+        state.values = JSON.parse(JSON.stringify(baseline));
+        state.history = { flood:[], fire:[], pollution:[] };
+        state.device = { status:"waiting", connected:false, updatedAt:null, telemetry:null, error:null };
+        state.demoPaused = false;
+        state.demoFloodShown = false;
+        HAZARDS.forEach(hazard=>{ updateRisk(hazard); pushHistory(hazard); });
+        updateOverall();
+        startLoop();
+      } else {
+        stopLoop();
+        state.device = { status:"waiting", connected:false, updatedAt:null, telemetry:null, error:null };
+      }
+      notify();
     },
     startScenario(scenario){
-      state.demo = true;
-      state.demoPaused = false;
+      this.setDemo(true);
       state.demoScenario = scenario === "pollution" ? "pollution" : "flood";
       state.event = null;
       state.demoFloodShown = state.demoScenario === "pollution";
@@ -275,6 +435,8 @@
     },
     resetDemo,
     refreshOnce(){ sampleOnce(1); }, // manual "Refresh readings" — small variation, no event
+    ingestHardware,
+    setHardwareStatus,
     levelFromScore,
   };
 

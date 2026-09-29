@@ -11,6 +11,7 @@
   };
 
   function fmt(hazard, key, val){
+    if(val === null || val === undefined || !Number.isFinite(Number(val))) return "N/A";
     let decimals = 1;
     if(key === "riseRate") decimals = 2;
     if(["waterLevel","visibility"].includes(key)) decimals = 1;
@@ -18,19 +19,90 @@
     return val.toFixed(decimals);
   }
 
+  function renderHardwarePanel(s){
+    const status = document.getElementById("hardware-connection");
+    const grid = document.getElementById("hardware-reading-grid");
+    if(!status || !grid) return;
+    const device = s.device;
+    if(s.demo){
+      status.className = "hardware-connection waiting";
+      status.textContent = "DEMO OVERRIDE";
+      grid.innerHTML = `<div class="hardware-empty">Scenario data is active. Live device readings resume when Demo Mode is turned off.</div>`;
+      return;
+    }
+    const connected = device.connected && s.hardwareMode;
+    status.className = "hardware-connection " + (connected ? "connected" : device.status);
+    status.textContent = connected ? "ESP32 CONNECTED" :
+      (device.status === "stale" ? "DATA STALE" : device.status === "offline" ? "BACKEND OFFLINE" : "WAITING FOR ESP32");
+
+    if(!s.hardwareMode || !device.telemetry){
+      grid.innerHTML = `<div class="hardware-empty">${device.status === "offline" ? "Backend is unavailable. Start the Node service to receive device readings." : "Waiting for the first ESP32 telemetry packet."}</div>`;
+      return;
+    }
+
+    const t = device.telemetry;
+    const measured = (value, unit="") => value === null || value === undefined || !Number.isFinite(Number(value))
+      ? "N/A" : Number(value).toFixed(1) + (unit ? ` <small>${unit}</small>` : "");
+    const raw = value => value === null || value === undefined ? "N/A" : `${Math.round(value)} <small>ADC</small>`;
+    const timestamp = device.updatedAt ? new Date(device.updatedAt).toLocaleTimeString() : "--";
+    const readings = [
+      ["MQ-2 sensor", raw(t.mq2Raw)],
+      ["MQ-135 sensor", raw(t.mq135Raw)],
+      ["Rain sensor", raw(t.rainRaw)],
+      ["Soil sensor", raw(t.soilRaw)],
+      ["Air temperature", measured(t.temperature,"°C")],
+      ["Humidity", measured(t.humidity,"%")],
+      ["Ultrasonic distance", t.waterValid ? measured(t.waterDistanceCm,"cm") : "NO ECHO"],
+      ["Measured water level", t.waterValid ? measured(t.waterLevelCm,"cm") : "N/A"],
+      ["Flood edge model", measured(t.floodRisk,"/100")],
+      ["AQI model estimate", measured(t.aqi,"AQI")],
+      ["Device alert", t.alert ? "ACTIVE" : "CLEAR"],
+      ["Last packet", timestamp],
+    ];
+    grid.innerHTML = readings.map(([label,value])=>`<div class="hardware-reading"><span>${label}</span><strong>${value}</strong></div>`).join("") +
+      `<p class="hardware-note">MQ-2 and MQ-135 are shown as raw ADC counts. They are sensor proxies, not calibrated ppm or particulate measurements. No wind or optical PM sensor is installed.</p>`;
+  }
+
+  function renderLiveLabels(card, hazard, live){
+    const captions = hazard === "flood"
+      ? (live ? {waterLevel:["Water level", "cm"], rainfall:["Rain sensor proxy", "%"], riseRate:["Level change", "cm/h"], flowRate:["Flow rate", ""]}
+        : {waterLevel:["Water level", "m"], rainfall:["Rainfall", "mm/h"], riseRate:["Rate of rise", "m/h"], flowRate:["Flow rate", "m³/s"]})
+      : hazard === "fire"
+        ? (live ? {temperature:["Temperature", "°C"],humidity:["Humidity", "%"],smoke:["MQ-2 raw signal", "ADC"],wind:["Wind sensor", ""]}
+          : {temperature:["Temperature", "°C"],humidity:["Humidity", "%"],smoke:["Smoke density", "%"],wind:["Wind speed", "km/h"]})
+        : (live ? {aqi:["Model AQI", ""],pm25:["PM2.5 sensor", ""],pm10:["PM10 sensor", ""],visibility:["Visibility sensor", ""]}
+          : {aqi:["AQI", ""],pm25:["PM2.5", "µg/m³"],pm10:["PM10", "µg/m³"],visibility:["Visibility", "km"]});
+    Object.entries(captions).forEach(([key,[label,unit]])=>{
+      const metric = card.querySelector(`[data-m="${key}"]`);
+      const caption = metric && metric.closest(".hc-metric");
+      if(!caption) return;
+      const labelEl = caption.querySelector(".m-label");
+      if(labelEl) labelEl.textContent = label;
+      const unitEl = metric.querySelector(".m-unit");
+      const hasValue = Number.isFinite(Number(metric.textContent.trim()));
+      if(unit && hasValue){
+        if(unitEl) unitEl.textContent = unit;
+        else metric.insertAdjacentHTML("beforeend", `<span class="m-unit">${unit}</span>`);
+      } else if(unitEl){
+        unitEl.remove();
+      }
+    });
+  }
+
   function drawSpark(canvas, series, color){
-    if(!canvas || !series.length) return;
+    const validSeries = series.filter(Number.isFinite);
+    if(!canvas || !validSeries.length) return;
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth || 260, h = canvas.clientHeight || 46;
     canvas.width = w*dpr; canvas.height = h*dpr;
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr,0,0,dpr,0,0);
     ctx.clearRect(0,0,w,h);
-    const min = Math.min(...series), max = Math.max(...series);
+    const min = Math.min(...validSeries), max = Math.max(...validSeries);
     const range = (max-min) || 1;
     ctx.beginPath();
-    series.forEach((v,i)=>{
-      const x = (i/(series.length-1||1)) * w;
+    validSeries.forEach((v,i)=>{
+      const x = (i/(validSeries.length-1||1)) * w;
       const y = h - ((v-min)/range) * (h-6) - 3;
       if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
     });
@@ -109,9 +181,16 @@
 
       card.querySelectorAll("[data-m]").forEach(el=>{
         const key = el.dataset.m;
-        const unit = METRIC_UNITS[key] || "";
-        el.innerHTML = fmt(hazard,key,values[key]) + (unit ? `<span class="m-unit">${unit}</span>` : "");
+        const unit = s.hardwareMode
+          ? ({waterLevel:"cm",rainfall:"%",riseRate:"cm/h",smoke:"ADC"}[key] || "")
+          : (METRIC_UNITS[key] || "");
+        const unavailable = s.hardwareMode && ((hazard === "flood" && key === "flowRate") ||
+          (hazard === "fire" && key === "wind") ||
+          (hazard === "pollution" && ["pm25","pm10","visibility"].includes(key)));
+        const value = unavailable ? null : values[key];
+        el.innerHTML = fmt(hazard,key,value) + (unit && value !== null ? `<span class="m-unit">${unit}</span>` : "");
       });
+      renderLiveLabels(card,hazard,s.hardwareMode);
 
       const levelEl = card.querySelector("[data-level]");
       levelEl.textContent = level.toUpperCase() === "HIGH" ? "HIGH RISK" : level.toUpperCase();
@@ -198,6 +277,15 @@
     const text = document.getElementById("global-status-text");
     pill.className = "status-pill " + (level==="normal" ? "safe" : (level==="warning" ? "warn" : "danger"));
     text.textContent = level==="normal" ? "ALL SYSTEMS NORMAL" : (level==="warning" ? "WARNING CONDITIONS DETECTED" : (level==="high" ? "HIGH RISK — MONITOR CLOSELY" : "CRITICAL — IMMEDIATE ACTION ADVISED"));
+    if(level === "normal" && s.hardwareMode && !s.demo){
+      if(!s.device.connected){
+        pill.className = "status-pill warn";
+        text.textContent = "DEVICE CONNECTION LOST — CHECK LIVE DATA";
+      } else if(s.device.telemetry && !s.device.telemetry.waterValid){
+        pill.className = "status-pill warn";
+        text.textContent = "WATER SENSOR FAULT — LEVEL UNAVAILABLE";
+      }
+    }
   }
 
   function alertCard(hazard, s){
@@ -223,14 +311,22 @@
   function renderAlerts(s){
     const list = document.getElementById("dash-alert-list");
     const active = PRITHVI.sensors.HAZARDS.filter(h => s.risk[h] !== "normal");
-    if(active.length === 0){
+    const waterFault = s.hardwareMode && s.device.telemetry && !s.device.telemetry.waterValid;
+    const deviceOffline = s.hardwareMode && !s.device.connected;
+    const deviceWarning = waterFault
+      ? `<div class="alert-banner warning"><div><div class="ab-title">Water-level sensor unavailable</div><div>Check HC-SR04 power, shared ground, TRIG/ECHO wiring, and use a voltage divider on the ESP32 ECHO input. Flood model output may be using its last valid water sample.</div></div></div>`
+      : deviceOffline
+        ? `<div class="alert-banner warning"><div><div class="ab-title">ESP32 telemetry is stale</div><div>Check Wi-Fi, backend availability, and the device connection before relying on the displayed readings.</div></div></div>`
+        : "";
+    if(active.length === 0 && !deviceWarning){
       list.innerHTML = `<div class="panel" style="color:var(--text-dim);font-size:13px;">No active alerts. All monitored zones are within normal parameters.</div>`;
       return;
     }
-    list.innerHTML = active.sort((a,b)=> s.riskScore[b]-s.riskScore[a]).map(h=>alertCard(h,s)).join("");
+    list.innerHTML = deviceWarning + active.sort((a,b)=> s.riskScore[b]-s.riskScore[a]).map(h=>alertCard(h,s)).join("");
   }
 
   function render(s){
+    renderHardwarePanel(s);
     renderCards(s);
     renderRouteDecision(s);
     renderRiskStrip(s);

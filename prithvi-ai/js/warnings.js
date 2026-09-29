@@ -27,27 +27,29 @@
 
     let conditionsLine = "";
 
+
+    const value = (key, digits = 1) =>
+      Number.isFinite(v[key]) ? v[key].toFixed(digits) : "N/A";
+
     if (hazard === "flood") {
-      conditionsLine =
-        `Water level ${v.waterLevel.toFixed(1)} m, rising ` +
-        `${v.riseRate.toFixed(2)} m/h, rainfall ` +
-        `${v.rainfall.toFixed(0)} mm/h`;
+      conditionsLine = s.hardwareMode
+        ? `Water level ${value("waterLevel")} cm, rain sensor ${value("rainfall", 0)}%, edge-model flood risk ${s.riskScore.flood.toFixed(0)}/100`
+        : `Water level ${value("waterLevel")} m, rising ${value("riseRate", 2)} m/h, rainfall ${value("rainfall", 0)} mm/h`;
     }
 
     if (hazard === "fire") {
-      conditionsLine =
-        `${v.temperature.toFixed(0)}°C, ` +
-        `${v.humidity.toFixed(0)}% humidity, smoke ` +
-        `${v.smoke.toFixed(0)}%, wind ` +
-        `${v.wind.toFixed(0)} km/h`;
+      conditionsLine = s.hardwareMode
+        ? `${value("temperature", 0)}°C, ${value("humidity", 0)}% humidity, MQ-2 raw signal ${value("smoke", 0)} ADC (smoke/gas proxy; no dedicated fire sensor)`
+        : `${value("temperature", 0)}°C, ${value("humidity", 0)}% humidity, smoke ${value("smoke", 0)}%, wind ${value("wind", 0)} km/h`;
     }
 
     if (hazard === "pollution") {
-      conditionsLine =
-        `AQI ${v.aqi.toFixed(0)}, PM2.5 ` +
-        `${v.pm25.toFixed(0)} µg/m³, visibility ` +
-        `${v.visibility.toFixed(1)} km`;
+      conditionsLine = s.hardwareMode
+        ? `Model AQI ${value("aqi", 0)}, MQ-135 raw signal ${value("pm25", 0)} ADC; PM and visibility sensors unavailable`
+        : `AQI ${value("aqi", 0)}, PM2.5 ${value("pm25", 0)} µg/m³, visibility ${value("visibility")} km`;
     }
+
+
 
     return `
       <div class="alert-banner ${bannerClass}">
@@ -468,16 +470,38 @@
 
   function render(s) {
     const list = document.getElementById("warnings-full-list");
-
     if (!list) return;
 
-    list.innerHTML = PRITHVI.sensors.HAZARDS.slice()
+    const sensorWarning =
+      s.hardwareMode && s.device.telemetry && !s.device.telemetry.waterValid
+        ? `<div class="alert-banner warning">
+             <div>
+               <div class="ab-title">Water-level sensor unavailable</div>
+               <div>
+                 Check HC-SR04 power, shared ground, TRIG/ECHO wiring,
+                 and add a voltage divider before the ESP32 ECHO pin.
+                 The flood model may be using its last valid water sample.
+               </div>
+             </div>
+           </div>`
+        : s.hardwareMode && !s.device.connected
+          ? `<div class="alert-banner warning">
+               <div>
+                 <div class="ab-title">ESP32 telemetry is stale</div>
+                 <div>
+                   Check the ESP32 Wi-Fi connection and backend before
+                   acting on the last displayed values.
+                 </div>
+               </div>
+             </div>`
+          : "";
 
-      .sort((a, b) => s.riskScore[b] - s.riskScore[a])
-
-      .map((h) => card(h, s))
-
-      .join("");
+    list.innerHTML =
+      sensorWarning +
+      PRITHVI.sensors.HAZARDS.slice()
+        .sort((a, b) => s.riskScore[b] - s.riskScore[a])
+        .map((h) => card(h, s))
+        .join("");
 
     /* ----------------------------------------------------------------------
        Find the highest-risk active hazard
@@ -485,7 +509,6 @@
 
     const activeHazards = PRITHVI.sensors.HAZARDS.filter((hazard) => {
       const level = s.risk[hazard];
-
       return level === "high" || level === "critical";
     });
 

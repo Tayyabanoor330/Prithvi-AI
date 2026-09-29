@@ -23,12 +23,15 @@ L.circleMarker([28.6188,77.2088], { radius: 8, color:'#315e8b', fillColor:'#315e
 L.circleMarker([28.6052,77.2178], { radius: 7, color:'#34775a', fillColor:'#b9e7c6', fillOpacity:1 }).addTo(map).bindTooltip('Safe destination');
 
 const sensorGrid = document.getElementById('sensorGrid');
-function renderSensors(sensors) {
+function renderSensors(sensors, waterValid = true) {
   sensorGrid.innerHTML = Object.entries(sensorMeta).map(([key, meta]) => {
+    const unavailable = key === 'water' && waterValid === false;
     const value = Number(sensors[key]) || 0;
-    const percent = Math.min(100, Math.round(value / meta.max * 100));
+    const percent = unavailable ? 0 : Math.min(100, Math.round(value / meta.max * 100));
     const isHigh = percent >= 60;
-    return `<div class="sensor"><div class="sensor-name"><span>${meta.label}</span><span class="sensor-icon">${meta.icon}</span></div><div class="sensor-value">${Math.round(value)} <span class="sensor-unit">${meta.unit}</span></div><div class="sensor-bar"><span style="width:${percent}%;background:${isHigh ? '#d85b4b' : '#34775a'}"></span></div></div>`;
+    const displayValue = unavailable ? 'N/A' : Math.round(value);
+    const displayUnit = unavailable ? '' : `<span class="sensor-unit">${meta.unit}</span>`;
+    return `<div class="sensor"><div class="sensor-name"><span>${meta.label}</span><span class="sensor-icon">${meta.icon}</span></div><div class="sensor-value">${displayValue} ${displayUnit}</div><div class="sensor-bar"><span style="width:${percent}%;background:${isHigh ? '#d85b4b' : '#34775a'}"></span></div></div>`;
   }).join('');
 }
 
@@ -49,7 +52,7 @@ function renderState(data) {
   routeLine.setLatLngs(reroute ? riskRoute : safeRoute).setStyle({ color: reroute ? '#d85b4b' : '#34775a' });
   document.getElementById('routeBadge').textContent = reroute ? 'ROUTE B · REROUTING' : 'ROUTE A · ACTIVE';
   document.getElementById('routeBadge').style.color = reroute ? '#d85b4b' : '#34775a';
-  renderSensors(data.sensors);
+  renderSensors(data.sensors, data.waterValid);
 }
 
 async function refresh() {

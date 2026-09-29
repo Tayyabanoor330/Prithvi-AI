@@ -105,6 +105,17 @@
         </div>
       </div>
 
+      <section class="panel hardware-panel" aria-labelledby="hardware-title">
+        <div class="hardware-panel-head">
+          <div>
+            <div class="rs-sub">DEVICE TELEMETRY</div>
+            <h2 id="hardware-title">ESP32 live readings</h2>
+          </div>
+          <span id="hardware-connection" class="hardware-connection waiting">WAITING FOR ESP32</span>
+        </div>
+        <div id="hardware-reading-grid" class="hardware-reading-grid" aria-live="polite"></div>
+      </section>
+
       <div class="panel" id="route-panel" style="margin-top:16px; margin-bottom:16px;"></div>
 
       <div class="route-map-wrap">
@@ -279,6 +290,21 @@
           <div class="cp-head"><h3>Pollution — AQI &amp; PM2.5</h3><span class="tag pollution">POLLUTION</span></div>
           <canvas class="bigchart" id="chart-pollution"></canvas>
           <div class="legend-row"><span class="lg"><span class="sw" style="background:var(--smog)"></span>AQI</span><span class="lg"><span class="sw" style="background:var(--danger)"></span>PM2.5</span></div>
+        </div>
+        <div class="panel chart-panel">
+          <div class="cp-head"><h3>Raw ADC — Gas sensors</h3><span class="tag pollution">ESP32</span></div>
+          <canvas class="bigchart" id="chart-raw-gas"></canvas>
+          <div class="legend-row"><span class="lg"><span class="sw" style="background:#d792f0"></span>MQ-2 ADC</span><span class="lg"><span class="sw" style="background:#67d6c1"></span>MQ-135 ADC</span></div>
+        </div>
+        <div class="panel chart-panel">
+          <div class="cp-head"><h3>Raw ADC — Flood sensors</h3><span class="tag flood">ESP32</span></div>
+          <canvas class="bigchart" id="chart-raw-flood"></canvas>
+          <div class="legend-row"><span class="lg"><span class="sw" style="background:#4f8ef7"></span>Rain ADC</span><span class="lg"><span class="sw" style="background:#2fd9c4"></span>Soil ADC</span></div>
+        </div>
+        <div class="panel chart-panel">
+          <div class="cp-head"><h3>Ultrasonic sensor — Distance</h3><span class="tag flood">ESP32</span></div>
+          <canvas class="bigchart" id="chart-raw-water"></canvas>
+          <div class="legend-row"><span class="lg"><span class="sw" style="background:#4f8ef7"></span>Echo distance (cm)</span></div>
         </div>
       </div>
 
@@ -555,6 +581,7 @@
 <script src="js/content.js"></script>
 <script src="js/nav.js"></script>
 <script src="js/sensors.js"></script>
+<script src="js/device.js"></script>
 <script src="js/dashboard.js"></script>
 <script src="js/monitoring.js"></script>
 <script src="js/warnings.js"></script>

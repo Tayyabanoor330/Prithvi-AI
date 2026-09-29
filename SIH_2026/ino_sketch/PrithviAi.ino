@@ -1,608 +1,278 @@
+#include <Arduino.h>
 #include <DHT.h>
-#include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFi.h>
+#include <math.h>
 #include <ArduinoJson.h>
 
 #include "flood_model.h"
 #include "aqi_model.h"
 
-// ============================================================
-// WIFI / BACKEND
-// ============================================================
+// Set these for your network. BACKEND_URL must use the computer's LAN IPv4,
+// not localhost, because the ESP32 is a separate device.
+const char *WIFI_SSID = "YOUR_WIFI_SSID";
+const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char *DEVICE_TOKEN = "PASTE_THE_SERVER_DEVICE_TOKEN_HERE";
+const char *BACKEND_URL = "http://YOUR_COMPUTER_LAN_IP:3000/api/readings";
 
-const char* WIFI_SSID = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char* BACKEND_URL = "http://192.168.1.100:3000/api/readings";
+constexpr unsigned long SEND_INTERVAL_MS = 5000;
+constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+constexpr float EMPTY_DISTANCE_CM = 7.72f;
+constexpr float MAX_WATER_LEVEL_CM = 7.72f;
+constexpr float ADC_MAX = 4095.0f;
+constexpr uint8_t WATER_SAMPLE_COUNT = 3;
 
-const unsigned long SEND_INTERVAL_MS = 5000;
-unsigned long lastSendMs = 0;
+constexpr int DHT_PIN = 14;
+constexpr int MQ2_PIN = 32;
+constexpr int MQ135_PIN = 33;
+constexpr int RAIN_PIN = 35;
+constexpr int SOIL_PIN = 34;
+constexpr int TRIG_PIN = 25;
+constexpr int ECHO_PIN = 26;
+constexpr int BUZZER_PIN = 4;
+constexpr int LED_PIN = 23;
 
-// ============================================================
-// SENSOR PINS
-// ============================================================
-
-#define DHT_PIN 14
 #define DHT_TYPE DHT11
 
-#define MQ2_PIN 32
-#define MQ135_PIN 33
-
-#define RAIN_PIN 35
-#define SOIL_PIN 34
-
-#define TRIG_PIN 25
-#define ECHO_PIN 26
-
-#define BUZZER_PIN 4
-#define LED_PIN 23
-
 DHT dht(DHT_PIN, DHT_TYPE);
+unsigned long lastSendMs = 0;
+unsigned long lastWifiAttemptMs = 0;
+float lastValidWaterLevelCm = 0.0f;
+bool hasValidWaterReading = false;
 
-// ============================================================
-// FLOOD MODEL / SENSOR CALIBRATION
-// ============================================================
-
-// Physical height of the prototype water container
-const float MODEL_HEIGHT_CM = 9.0;
-
-// ESP32 ADC maximum for the current configuration
-const float ADC_MAX = 4095.0;
-
-// ============================================================
-// WATER LEVEL
-// ============================================================
-
-float getWaterDistance() {
+float readOneWaterDistanceCm() {
   digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-
+  delayMicroseconds(3);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
-
   digitalWrite(TRIG_PIN, LOW);
 
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  const unsigned long durationUs = pulseIn(ECHO_PIN, HIGH, 30000UL);
+  if (durationUs == 0) return -1.0f;
 
-  if (duration == 0) {
-    return -1;
+  const float distanceCm = durationUs * 0.0343f / 2.0f;
+  if (!isfinite(distanceCm) || distanceCm < 2.0f || distanceCm > 400.0f) {
+    return -1.0f;
+  }
+  return distanceCm;
+}
+
+float readWaterDistanceCm() {
+  float samples[WATER_SAMPLE_COUNT];
+  uint8_t validCount = 0;
+
+  for (uint8_t i = 0; i < WATER_SAMPLE_COUNT; ++i) {
+    const float value = readOneWaterDistanceCm();
+    if (value >= 0.0f) samples[validCount++] = value;
+    if (i + 1 < WATER_SAMPLE_COUNT) delay(55);
   }
 
-  float distance = duration * 0.0343 / 2.0;
+  if (validCount == 0) return -1.0f;
 
-  return distance;
+  // Sort the small sample set and return its median to reject single echoes.
+  for (uint8_t i = 0; i < validCount; ++i) {
+    for (uint8_t j = i + 1; j < validCount; ++j) {
+      if (samples[j] < samples[i]) {
+        const float temp = samples[i];
+        samples[i] = samples[j];
+        samples[j] = temp;
+      }
+    }
+  }
+  return samples[validCount / 2];
 }
 
-// ============================================================
-// RAW SENSOR → MODEL FEATURE CONVERSION
-// ============================================================
-
-// Rain sensor:
-// Current dry reading ≈ 4095
-// Wet reading becomes lower.
-//
-// Converts:
-//     raw 4095 → 0%
-//     raw 0    → 100%
-float convertRainToPercent(int rainRaw) {
-
-  float rainIntensity =
-      ((ADC_MAX - (float)rainRaw) / ADC_MAX) * 100.0;
-
-  return constrain(rainIntensity, 0.0, 100.0);
+float waterLevelFromDistance(float distanceCm) {
+  if (!isfinite(distanceCm) || distanceCm < 0.0f) return -1.0f;
+  return constrain(EMPTY_DISTANCE_CM - distanceCm, 0.0f, MAX_WATER_LEVEL_CM);
 }
 
-
-// Soil sensor:
-// Current dry reading ≈ 4095
-// Wet reading becomes lower.
-//
-// Converts:
-//     raw 4095 → 0%
-//     raw 0    → 100%
-float convertSoilToPercent(int soilRaw) {
-
-  float soilMoisture =
-      ((ADC_MAX - (float)soilRaw) / ADC_MAX) * 100.0;
-
-  return constrain(soilMoisture, 0.0, 100.0);
+float toPercent(int rawValue) {
+  return constrain((ADC_MAX - rawValue) * 100.0f / ADC_MAX, 0.0f, 100.0f);
 }
-
-// ============================================================
-// CATEGORY FUNCTIONS
-// ============================================================
 
 String floodCategory(float risk) {
-
-  if (risk < 25.0) {
-    return "Low";
-  }
-
-  if (risk < 50.0) {
-    return "Moderate";
-  }
-
-  if (risk < 75.0) {
-    return "High";
-  }
-
+  if (risk < 25.0f) return "Low";
+  if (risk < 50.0f) return "Moderate";
+  if (risk < 75.0f) return "High";
   return "Critical";
 }
 
-
 String aqiCategory(float aqi) {
-
-  if (aqi <= 50.0) {
-    return "Good";
-  }
-
-  if (aqi <= 100.0) {
-    return "Satisfactory";
-  }
-
-  if (aqi <= 200.0) {
-    return "Moderate";
-  }
-
-  if (aqi <= 300.0) {
-    return "Poor";
-  }
-
-  if (aqi <= 400.0) {
-    return "Very Poor";
-  }
-
+  if (aqi <= 50.0f) return "Good";
+  if (aqi <= 100.0f) return "Satisfactory";
+  if (aqi <= 200.0f) return "Moderate";
+  if (aqi <= 300.0f) return "Poor";
+  if (aqi <= 400.0f) return "Very Poor";
   return "Severe";
 }
 
-// ============================================================
-// WIFI
-// ============================================================
+void startWifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  lastWifiAttemptMs = millis();
+  Serial.println("Connecting to Wi-Fi; sensor sampling will continue meanwhile.");
+}
 
-void connectToWifi() {
+void maintainWifi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  if (millis() - lastWifiAttemptMs < WIFI_RETRY_INTERVAL_MS) return;
 
-  if (WiFi.status() == WL_CONNECTED) {
+  lastWifiAttemptMs = millis();
+  Serial.println("Wi-Fi disconnected; retrying.");
+  WiFi.disconnect();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+}
+
+void sendTelemetry(float temperature, float humidity, int mq2Raw, int mq135Raw,
+                   int rainRaw, int soilRaw, float rainPercent, float soilPercent,
+                   float waterDistanceCm, bool waterValid, float waterLevelCm,
+                   float floodRisk, const String &floodStatus, float aqi,
+                   const String &aqiStatus, bool alert) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("HTTP skipped: ESP32 is not connected to Wi-Fi.");
     return;
   }
 
-  WiFi.mode(WIFI_STA);
-
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  Serial.print("Connecting to WiFi");
-
-  while (WiFi.status() != WL_CONNECTED) {
-
-    delay(500);
-
-    Serial.print(".");
-  }
-
-  Serial.println();
-
-  Serial.print("WiFi connected. IP: ");
-
-  Serial.println(WiFi.localIP());
-}
-
-// ============================================================
-// SEND TELEMETRY
-// ============================================================
-
-void sendTelemetry(
-    float temperature,
-    float humidity,
-    int mq2Raw,
-    int mq135Raw,
-    int rainRaw,
-    int soilRaw,
-    float rainIntensity,
-    float soilMoisture,
-    float waterDistance,
-    float waterLevel,
-    float floodRisk,
-    const String& floodStatus,
-    float aqi,
-    const String& aqiStatus,
-    bool alert
-) {
-
-  if (WiFi.status() != WL_CONNECTED) {
-    connectToWifi();
-  }
-
-  StaticJsonDocument<1024> payload;
-
-  // ----------------------------------------------------------
-  // ENVIRONMENT
-  // ----------------------------------------------------------
-
-  if (isnan(temperature)) {
-    payload["temperature"] = nullptr;
-  }
-  else {
-    payload["temperature"] = temperature;
-  }
-
-  if (isnan(humidity)) {
-    payload["humidity"] = nullptr;
-  }
-  else {
-    payload["humidity"] = humidity;
-  }
-
-  // ----------------------------------------------------------
-  // RAW POLLUTION SENSOR VALUES
-  // ----------------------------------------------------------
+  JsonDocument payload;
+  payload["source"] = "esp32";
+  if (isfinite(temperature)) payload["temperature"] = temperature;
+  else payload["temperature"] = nullptr;
+  if (isfinite(humidity)) payload["humidity"] = humidity;
+  else payload["humidity"] = nullptr;
 
   payload["mq2Raw"] = mq2Raw;
   payload["mq135Raw"] = mq135Raw;
-
-  // ----------------------------------------------------------
-  // RAW FLOOD SENSOR VALUES
-  // ----------------------------------------------------------
-
   payload["rainRaw"] = rainRaw;
   payload["soilRaw"] = soilRaw;
-
-  // ----------------------------------------------------------
-  // FLOOD MODEL INPUTS
-  // ----------------------------------------------------------
-
-  payload["rainIntensity"] = rainIntensity;
-  payload["soilMoisture"] = soilMoisture;
-
-  if (waterDistance >= 0) {
-    payload["waterDistance"] = waterDistance;
+  payload["rainIntensity"] = rainPercent;
+  payload["soilMoisture"] = soilPercent;
+  payload["waterValid"] = waterValid;
+  if (waterValid) {
+    payload["waterDistanceCm"] = waterDistanceCm;
+    payload["waterLevelCm"] = waterLevelCm;
+    payload["waterPercent"] = waterLevelCm * 100.0f / MAX_WATER_LEVEL_CM;
+  } else {
+    payload["waterDistanceCm"] = nullptr;
+    payload["waterLevelCm"] = nullptr;
+    payload["waterPercent"] = nullptr;
   }
-  else {
-    payload["waterDistance"] = nullptr;
-  }
-
-  payload["waterLevel"] = waterLevel;
-
-  // ----------------------------------------------------------
-  // EDGE AI RESULTS
-  // ----------------------------------------------------------
-
   payload["floodRisk"] = floodRisk;
   payload["floodCategory"] = floodStatus;
-
   payload["aqi"] = aqi;
   payload["aqiCategory"] = aqiStatus;
-
-  // ----------------------------------------------------------
-  // ALERT
-  // ----------------------------------------------------------
-
   payload["alert"] = alert;
 
-  // ----------------------------------------------------------
-  // JSON SERIALIZATION
-  // ----------------------------------------------------------
-
   String body;
-
   serializeJson(payload, body);
 
-  // ----------------------------------------------------------
-  // HTTP POST
-  // ----------------------------------------------------------
-
   HTTPClient http;
-
-  http.begin(BACKEND_URL);
-
+  http.setConnectTimeout(3000);
+  http.setTimeout(3000);
+  if (!http.begin(BACKEND_URL)) {
+    Serial.println("HTTP error: could not initialize the backend URL.");
+    return;
+  }
   http.addHeader("Content-Type", "application/json");
-
-  int statusCode = http.POST(body);
-
-  Serial.print("HTTP POST status: ");
-  Serial.println(statusCode);
-
-  Serial.print("Payload: ");
-  Serial.println(body);
-
+  http.addHeader("X-Device-Token", DEVICE_TOKEN);
+  const int statusCode = http.POST(body);
+  Serial.printf("POST %s -> HTTP %d\n", BACKEND_URL, statusCode);
+  if (statusCode < 200 || statusCode >= 300) {
+    Serial.println(http.getString());
+  }
   http.end();
 }
 
-// ============================================================
-// SETUP
-// ============================================================
-
 void setup() {
-
   Serial.begin(115200);
+  analogReadResolution(12);
+  analogSetPinAttenuation(MQ2_PIN, ADC_11db);
+  analogSetPinAttenuation(MQ135_PIN, ADC_11db);
+  analogSetPinAttenuation(RAIN_PIN, ADC_11db);
+  analogSetPinAttenuation(SOIL_PIN, ADC_11db);
 
   dht.begin();
-
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
-
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
-
+  digitalWrite(TRIG_PIN, LOW);
   digitalWrite(BUZZER_PIN, LOW);
   digitalWrite(LED_PIN, LOW);
+  startWifi();
 
-  connectToWifi();
-
-  Serial.println();
-  Serial.println("==========================================");
-  Serial.println(" AI ENVIRONMENTAL MONITORING SYSTEM");
-  Serial.println(" ESP32 EDGE AI SENSOR SYSTEM");
-  Serial.println("==========================================");
-  Serial.println();
-
-  delay(2000);
+  Serial.println("ESP32 environmental monitor ready.");
+  Serial.println("Check ECHO voltage divider and shared GND if water readings are invalid.");
 }
 
-// ============================================================
-// MAIN LOOP
-// ============================================================
-
 void loop() {
+  maintainWifi();
 
-  // ==========================================================
-  // 1. READ SENSORS
-  // ==========================================================
+  const float temperature = dht.readTemperature();
+  const float humidity = dht.readHumidity();
+  const int mq2Raw = analogRead(MQ2_PIN);
+  const int mq135Raw = analogRead(MQ135_PIN);
+  const int rainRaw = analogRead(RAIN_PIN);
+  const int soilRaw = analogRead(SOIL_PIN);
 
-  float temperature = dht.readTemperature();
-
-  float humidity = dht.readHumidity();
-
-  int mq2Raw = analogRead(MQ2_PIN);
-
-  int mq135Raw = analogRead(MQ135_PIN);
-
-  int rainRaw = analogRead(RAIN_PIN);
-
-  int soilRaw = analogRead(SOIL_PIN);
-
-  float waterDistance = getWaterDistance();
-
-
-  // ==========================================================
-  // 2. CALCULATE WATER LEVEL
-  // ==========================================================
-
-  float waterLevel = 0.0;
-
-  if (waterDistance >= 0) {
-
-    waterLevel = MODEL_HEIGHT_CM - waterDistance;
-
-    if (waterLevel < 0) {
-      waterLevel = 0;
-    }
-
-    if (waterLevel > MODEL_HEIGHT_CM) {
-      waterLevel = MODEL_HEIGHT_CM;
-    }
+  const float waterDistanceCm = readWaterDistanceCm();
+  const bool waterValid = waterDistanceCm >= 0.0f;
+  if (waterValid) {
+    lastValidWaterLevelCm = waterLevelFromDistance(waterDistanceCm);
+    hasValidWaterReading = true;
   }
+  // Keep model input stable during echo loss, but never publish the fallback
+  // as a measured value. The payload carries waterValid=false in that case.
+  const float waterLevelCm = hasValidWaterReading ? lastValidWaterLevelCm : 0.0f;
 
+  const float rainPercent = toPercent(rainRaw);
+  const float soilPercent = toPercent(soilRaw);
+  int16_t floodFeatures[5] = {
+    static_cast<int16_t>(isfinite(temperature) ? roundf(temperature) : 0),
+    static_cast<int16_t>(isfinite(humidity) ? roundf(humidity) : 0),
+    static_cast<int16_t>(roundf(rainPercent)),
+    static_cast<int16_t>(roundf(soilPercent)),
+    static_cast<int16_t>(roundf(waterLevelCm))
+  };
+  float floodRisk = constrain(flood_model_predict(floodFeatures, 5), 0.0f, 100.0f);
+  const String floodStatus = floodCategory(floodRisk);
 
-  // ==========================================================
-  // 3. CONVERT FLOOD SENSOR VALUES
-  // ==========================================================
-
-  float rainIntensity =
-      convertRainToPercent(rainRaw);
-
-  float soilMoisture =
-      convertSoilToPercent(soilRaw);
-
-
-  // ==========================================================
-  // 4. PREPARE FLOOD MODEL INPUT
-  // ==========================================================
-
-  int16_t floodFeatures[5];
-
-  floodFeatures[0] =
-      isnan(temperature) ? 0 : (int16_t)round(temperature);
-
-  floodFeatures[1] =
-      isnan(humidity) ? 0 : (int16_t)round(humidity);
-
-  floodFeatures[2] =
-      (int16_t)round(rainIntensity);
-
-  floodFeatures[3] =
-      (int16_t)round(soilMoisture);
-
-  floodFeatures[4] =
-      (int16_t)round(waterLevel);
-
-
-  // ==========================================================
-  // 5. FLOOD EDGE AI INFERENCE
-  // ==========================================================
-
-  float floodRisk =
-      flood_model_predict(
-          floodFeatures,
-          5
-      );
-
-  floodRisk = constrain(
-      floodRisk,
-      0.0,
-      100.0
-  );
-
-  String floodStatus =
-      floodCategory(floodRisk);
-
-
-  // ==========================================================
-  // 6. PREPARE AQI MODEL INPUT
-  // ==========================================================
-
-  int16_t aqiFeatures[4];
-
-  aqiFeatures[0] =
-      isnan(temperature) ? 0 : (int16_t)round(temperature);
-
-  aqiFeatures[1] =
-      isnan(humidity) ? 0 : (int16_t)round(humidity);
-
-  aqiFeatures[2] =
-      (int16_t)mq2Raw;
-
-  aqiFeatures[3] =
-      (int16_t)mq135Raw;
-
-
-  // ==========================================================
-  // 7. AQI EDGE AI INFERENCE
-  // ==========================================================
-
-  float aqi =
-      aqi_model_predict(
-          aqiFeatures,
-          4
-      );
-
-  if (aqi < 0) {
-    aqi = 0;
-  }
-
-  String aqiStatus =
-      aqiCategory(aqi);
-
-
-  // ==========================================================
-  // 8. ALERT LOGIC
-  // ==========================================================
-
-  bool floodAlert =
-      floodRisk >= 50.0;
-
-  bool pollutionAlert =
-      aqi > 100.0;
-
-  bool alert =
-      floodAlert || pollutionAlert;
-
-
-  // ==========================================================
-  // 9. HARDWARE ALERT
-  // ==========================================================
-
-  if (alert) {
-
-    digitalWrite(LED_PIN, HIGH);
-
-    digitalWrite(BUZZER_PIN, HIGH);
-  }
-  else {
-
-    digitalWrite(LED_PIN, LOW);
-
-    digitalWrite(BUZZER_PIN, LOW);
-  }
-
-
-  // ==========================================================
-  // 10. SERIAL MONITOR
-  // ==========================================================
+  int16_t aqiFeatures[4] = {
+    static_cast<int16_t>(isfinite(temperature) ? roundf(temperature) : 0),
+    static_cast<int16_t>(isfinite(humidity) ? roundf(humidity) : 0),
+    static_cast<int16_t>(mq2Raw),
+    static_cast<int16_t>(mq135Raw)
+  };
+  float aqi = constrain(aqi_model_predict(aqiFeatures, 4), 0.0f, 500.0f);
+  const String aqiStatus = aqiCategory(aqi);
+  const bool alert = floodRisk >= 50.0f || aqi > 100.0f;
+  digitalWrite(LED_PIN, alert ? HIGH : LOW);
+  digitalWrite(BUZZER_PIN, alert ? HIGH : LOW);
 
   Serial.println();
-  Serial.println("==========================================");
-  Serial.println(" SENSOR READINGS");
-  Serial.println("==========================================");
-
-  Serial.print("Temperature (C): ");
-  Serial.println(temperature);
-
-  Serial.print("Humidity (%): ");
-  Serial.println(humidity);
-
-  Serial.print("MQ-2 raw: ");
-  Serial.println(mq2Raw);
-
-  Serial.print("MQ-135 raw: ");
-  Serial.println(mq135Raw);
-
-  Serial.print("Rain raw: ");
-  Serial.println(rainRaw);
-
-  Serial.print("Rain intensity (%): ");
-  Serial.println(rainIntensity);
-
-  Serial.print("Soil raw: ");
-  Serial.println(soilRaw);
-
-  Serial.print("Soil moisture (%): ");
-  Serial.println(soilMoisture);
-
-  Serial.print("Water distance (cm): ");
-  Serial.println(waterDistance);
-
-  Serial.print("Water level (cm): ");
-  Serial.println(waterLevel);
-
-
-  // ==========================================================
-  // 11. EDGE AI OUTPUT
-  // ==========================================================
-
-  Serial.println();
-  Serial.println("==========================================");
-  Serial.println(" EDGE AI INFERENCE");
-  Serial.println("==========================================");
-
-  Serial.println("--- FLOOD MODEL ---");
-
-  Serial.print("Flood risk: ");
-  Serial.print(floodRisk, 1);
-  Serial.println("/100");
-
-  Serial.print("Flood category: ");
-  Serial.println(floodStatus);
-
-  Serial.println();
-
-  Serial.println("--- AQI MODEL ---");
-
-  Serial.print("Predicted AQI: ");
-  Serial.println(aqi, 1);
-
-  Serial.print("AQI category: ");
-  Serial.println(aqiStatus);
-
-  Serial.println();
-
-  Serial.print("ALERT: ");
-  Serial.println(alert ? "YES" : "NO");
-
-
-  // ==========================================================
-  // 12. SEND DATA TO BACKEND
-  // ==========================================================
+  Serial.printf("Temp: %.1f C | Humidity: %.1f %%\n", temperature, humidity);
+  Serial.printf("MQ2: %d | MQ135: %d | Rain: %.1f %% | Soil: %.1f %%\n",
+                mq2Raw, mq135Raw, rainPercent, soilPercent);
+  if (waterValid) {
+    Serial.printf("Water distance: %.2f cm | Water level: %.2f cm\n",
+                  waterDistanceCm, waterLevelCm);
+  } else {
+    Serial.printf("Water sensor ERROR (no valid echo); last measured level: %.2f cm\n",
+                  waterLevelCm);
+  }
+  Serial.printf("Flood: %.1f (%s) | AQI: %.1f (%s) | Alert: %s\n",
+                floodRisk, floodStatus.c_str(), aqi, aqiStatus.c_str(), alert ? "YES" : "NO");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("Wi-Fi IP: %s | RSSI: %d dBm\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  }
 
   if (millis() - lastSendMs >= SEND_INTERVAL_MS) {
-
     lastSendMs = millis();
-
-    sendTelemetry(
-        temperature,
-        humidity,
-        mq2Raw,
-        mq135Raw,
-        rainRaw,
-        soilRaw,
-        rainIntensity,
-        soilMoisture,
-        waterDistance,
-        waterLevel,
-        floodRisk,
-        floodStatus,
-        aqi,
-        aqiStatus,
-        alert
-    );
+    sendTelemetry(temperature, humidity, mq2Raw, mq135Raw, rainRaw, soilRaw,
+                  rainPercent, soilPercent, waterDistanceCm, waterValid,
+                  waterLevelCm, floodRisk, floodStatus, aqi, aqiStatus, alert);
   }
-
   delay(2000);
 }
